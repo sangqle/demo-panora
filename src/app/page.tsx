@@ -14,8 +14,8 @@ export default function Home() {
       <style jsx>
         {`
           #panorama {
-            width: 600px;
-            height: 400px;
+            width: 1200px;
+            height: 1000px;
           }
           .custom-hotspot {
             height: 50px;

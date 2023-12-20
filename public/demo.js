@@ -47,6 +47,9 @@ function createDivShowImage(hotSpotDiv, args) {
   div.style.width = 400 + "px";
   div.style.marginLeft = -(div.scrollWidth - hotSpotDiv.offsetWidth) / 2 + "px";
   div.style.marginTop = -div.scrollHeight - 12 + "px";
+  div.onclick = function () {
+    alert("Click to div, show image or modal");
+  };
   div.innerHTML = `<img style="
     max-width: 100%;
     max-height: 100%;"

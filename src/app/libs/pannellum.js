@@ -1,6 +1,36 @@
-import libpannellum from "./libpannellum";
+/*
+ * Pannellum - An HTML5 based Panorama Viewer
+ * Copyright (c) 2011-2022 Matthew Petroff
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included in
+ * all copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+ * THE SOFTWARE.
+ */
 
-export default (function (window, document, undefined) {
+window.pannellum = (function (window, document, undefined) {
+  "use strict";
+
+  /**
+   * Creates a new panorama viewer.
+   * @constructor
+   * @param {HTMLElement|string} container - The container (div) element for the
+   *      viewer, or its ID.
+   * @param {Object} initialConfig - Initial configuration for viewer.
+   */
   function Viewer(container, initialConfig) {
     var _this = this;
 
@@ -8,6 +38,7 @@ export default (function (window, document, undefined) {
     var config,
       renderer,
       preview,
+      draggingHotSpot,
       isUserInteracting = false,
       latestInteraction = Date.now(),
       onPointerDownPointerX = 0,
@@ -19,6 +50,7 @@ export default (function (window, document, undefined) {
       fullscreenActive = false,
       loaded,
       error = false,
+      isTimedOut = false,
       listenersAdded = false,
       panoImage,
       prevTime,
@@ -35,7 +67,9 @@ export default (function (window, document, undefined) {
       specifiedPhotoSphereExcludes = [],
       update = false, // Should we update when still to render dynamic content
       eps = 1e-6,
+      resizeObserver,
       hotspotsCreated = false,
+      xhr,
       destroyed = false;
 
     var defaultConfig = {
@@ -44,8 +78,8 @@ export default (function (window, document, undefined) {
       multiResMinHfov: false,
       maxHfov: 120,
       pitch: 0,
-      minPitch: -90,
-      maxPitch: 90,
+      minPitch: undefined,
+      maxPitch: undefined,
       yaw: 0,
       minYaw: -180,
       maxYaw: 180,
@@ -53,9 +87,10 @@ export default (function (window, document, undefined) {
       haov: 360,
       vaov: 180,
       vOffset: 0,
+      is_autorotating: false,
       autoRotate: false,
       autoRotateInactivityDelay: -1,
-      autoRotateStopDelay: 0,
+      autoRotateStopDelay: undefined,
       type: "equirectangular",
       northOffset: 0,
       showFullscreenCtrl: true,
@@ -73,19 +108,23 @@ export default (function (window, document, undefined) {
       avoidShowingBackground: false,
       animationTimingFunction: timingFunction,
       draggable: true,
-      disableKeyboardCtrl: false,
+      dragConfirm: false,
+      disableKeyboardCtrl: 1,
       crossOrigin: "anonymous",
+      targetBlank: false,
       touchPanSpeedCoeffFactor: 1,
       capturedKeyNumbers: [
-        16, 17, 27, 37, 38, 39, 40, 61, 65, 68, 83, 87, 107, 109, 173, 187, 189,
+        16, 17, 27, 37, 38, 39, 40, 61, 65, 68, 83, 87, 88, 90, 107, 109, 173,
+        187, 189,
       ],
       friction: 0.15,
+      zoom_friction: 0.05,
     };
 
     // Translatable / configurable strings
     // Some strings contain '%s', which is a placeholder for inserted values
     // When setting strings in external configuration, `\n` should be used instead of `<br>` to insert line breaks
-    defaultConfig.uiText = {
+    defaultConfig.strings = {
       // Labels
       loadButtonLabel: "Click to<br>Load<br>Panorama",
       loadingLabel: "Loading...",
@@ -107,6 +146,12 @@ export default (function (window, document, undefined) {
         "%spx wide. Try another device." +
         " (If you're the author, try scaling down the image.)", // Two substitutions: image width, max image width
       unknownError: "Unknown error. Check developer console.",
+      twoTouchActivate: "Use two fingers together to pan the panorama.",
+      twoTouchXActivate:
+        "Use two fingers together to pan the panorama horizontally.",
+      twoTouchYActivate:
+        "Use two fingers together to pan the panorama vertically.",
+      ctrlZoomActivate: "Use %s + scroll to zoom the panorama.", // One substitution: key name
     };
 
     // Initialize container
@@ -132,9 +177,8 @@ export default (function (window, document, undefined) {
 
     // Display about information on right click
     var aboutMsg = document.createElement("span");
-    aboutMsg.className = "pnlm-about-msg";
-    aboutMsg.innerHTML =
-      '<a href="https://pannellum.org/" target="_blank">Pannellum</a>';
+    aboutMsg.className = "";
+    aboutMsg.innerHTML = "";
     uiContainer.appendChild(aboutMsg);
     dragFix.addEventListener("contextmenu", aboutMessage);
 
@@ -153,9 +197,6 @@ export default (function (window, document, undefined) {
     infoDisplay.title = document.createElement("div");
     infoDisplay.title.className = "pnlm-title-box";
     infoDisplay.container.appendChild(infoDisplay.title);
-    infoDisplay.description = document.createElement("div");
-    infoDisplay.description.className = "pnlm-description-box";
-    infoDisplay.container.appendChild(infoDisplay.description);
     infoDisplay.author = document.createElement("div");
     infoDisplay.author.className = "pnlm-author-box";
     infoDisplay.container.appendChild(infoDisplay.author);
@@ -187,6 +228,11 @@ export default (function (window, document, undefined) {
     infoDisplay.errorMsg.className = "pnlm-error-msg pnlm-info-box";
     uiContainer.appendChild(infoDisplay.errorMsg);
 
+    // Interaction message
+    //infoDisplay.interactionMsg = document.createElement('div');
+    //infoDisplay.interactionMsg.className = 'pnlm-interaction-msg pnlm-info-box';
+    //uiContainer.appendChild(infoDisplay.interactionMsg);
+
     // Create controls
     var controls = {};
     controls.container = document.createElement("div");
@@ -194,7 +240,7 @@ export default (function (window, document, undefined) {
     uiContainer.appendChild(controls.container);
 
     // Load button
-    controls.load = document.createElement("div");
+    controls.load = document.createElement("button");
     controls.load.className = "pnlm-load-button";
     controls.load.addEventListener("click", function () {
       processOptions();
@@ -230,7 +276,7 @@ export default (function (window, document, undefined) {
 
     // Device orientation toggle
     controls.orientation = document.createElement("div");
-    controls.orientation.addEventListener("click", function () {
+    controls.orientation.addEventListener("click", function (e) {
       if (orientation) stopOrientation();
       else startOrientation();
     });
@@ -248,8 +294,14 @@ export default (function (window, document, undefined) {
     var orientationSupport = false;
     if (
       window.DeviceOrientationEvent &&
-      location.protocol === "https:" &&
-      navigator.userAgent.toLowerCase().indexOf("mobi") >= 0
+      location.protocol == "https:" &&
+      (navigator.userAgent.toLowerCase().indexOf("mobi") >= 0 ||
+        /Pacific Build.+OculusBrowser.+SamsungBrowser.+MobileVR/i.test(
+          window.navigator.userAgent
+        ) ||
+        (navigator.userAgent.indexOf("Mac") >= 0 &&
+          navigator.maxTouchPoints &&
+          navigator.maxTouchPoints > 0))
     ) {
       // This user agent check is here because there's no way to check if a
       // device has an inertia measurement unit. We used to be able to check if a
@@ -286,7 +338,7 @@ export default (function (window, document, undefined) {
       // Based on: http://stackoverflow.com/a/10965203
       var div = document.createElement("div");
       div.innerHTML = "<!--[if lte IE 9]><i></i><![endif]-->";
-      if (div.getElementsByTagName("i").length === 1) {
+      if (div.getElementsByTagName("i").length == 1) {
         anError();
         return;
       }
@@ -296,7 +348,7 @@ export default (function (window, document, undefined) {
 
       var i, p;
 
-      if (config.type === "cubemap") {
+      if (config.type == "cubemap") {
         panoImage = [];
         for (i = 0; i < 6; i++) {
           panoImage.push(new Image());
@@ -304,7 +356,7 @@ export default (function (window, document, undefined) {
         }
         infoDisplay.load.lbox.style.display = "block";
         infoDisplay.load.lbar.style.display = "none";
-      } else if (config.type === "multires") {
+      } else if (config.type == "multires") {
         var c = JSON.parse(JSON.stringify(config.multiRes)); // Deep copy
         // Avoid "undefined" in path, check (optional) multiRes.basePath, too
         // Use only multiRes.basePath if it's an absolute URL
@@ -322,10 +374,10 @@ export default (function (window, document, undefined) {
         panoImage = c;
       } else {
         if (config.dynamic === true) {
-          panoImage = config.imageSource;
+          panoImage = config.panorama;
         } else {
-          if (config.imageSource === undefined) {
-            anError(config.uiText.noPanoramaError);
+          if (config.panorama === undefined) {
+            anError(config.strings.noPanoramaError);
             return;
           }
           panoImage = new Image();
@@ -333,7 +385,7 @@ export default (function (window, document, undefined) {
       }
 
       // Configure image loading
-      if (config.type === "cubemap") {
+      if (config.type == "cubemap") {
         // Quick loading counter for synchronous loading
         var itemsToLoad = 6;
 
@@ -347,15 +399,13 @@ export default (function (window, document, undefined) {
         var onError = function (e) {
           var a = document.createElement("a");
           a.href = e.target.src;
-          a.innerHTML = a.href;
-          anError(config.uiText.fileAccessError.replace("%s", a.outerHTML));
+          a.textContent = a.href;
+          anError(config.strings.fileAccessError.replace("%s", a.outerHTML));
         };
 
         for (i = 0; i < panoImage.length; i++) {
-          panoImage[i].onload = onLoad;
-          panoImage[i].onerror = onError;
           p = config.cubeMap[i];
-          if (p === "null") {
+          if (p == "null") {
             // support partial cubemap image with explicitly empty faces
             console.log(
               "Will use background instead of missing cubemap face " + i
@@ -368,10 +418,9 @@ export default (function (window, document, undefined) {
             panoImage[i].onload = onLoad;
             panoImage[i].onerror = onError;
             panoImage[i].src = sanitizeURL(p);
-            //panoImage[i].src = encodeURI(p);
           }
         }
-      } else if (config.type === "multires") {
+      } else if (config.type == "multires") {
         onImageLoad();
       } else {
         p = "";
@@ -381,28 +430,39 @@ export default (function (window, document, undefined) {
 
         if (config.dynamic !== true) {
           // Still image
-          p = absoluteURL(config.imageSource)
-            ? config.imageSource
-            : p + config.imageSource;
+          if (
+            config.panorama instanceof Image ||
+            config.panorama instanceof ImageData ||
+            (window.ImageBitmap && config.panorama instanceof ImageBitmap)
+          ) {
+            panoImage = config.panorama;
+            onImageLoad();
+            return;
+          }
+
+          p = absoluteURL(config.panorama)
+            ? config.panorama
+            : p + config.panorama;
 
           panoImage.onload = function () {
             window.URL.revokeObjectURL(this.src); // Clean up
             onImageLoad();
           };
 
-          var xhr = new XMLHttpRequest();
+          xhr = new XMLHttpRequest();
           xhr.onloadend = function () {
             if (xhr.status != 200) {
               // Display error if image can't be loaded
               var a = document.createElement("a");
               a.href = p;
               a.textContent = a.href;
-              anError(config.uiText.fileAccessError.replace("%s", a.outerHTML));
+              anError(
+                config.strings.fileAccessError.replace("%s", a.outerHTML)
+              );
+              return;
             }
             var img = this.response;
-            if (img) {
-              parseGPanoXMP(img);
-            }
+            parseGPanoXMP(img, p);
             infoDisplay.load.msg.innerHTML = "";
           };
           xhr.onprogress = function (e) {
@@ -436,7 +496,7 @@ export default (function (window, document, undefined) {
             xhr.open("GET", p, true);
           } catch (e) {
             // Malformed URL
-            anError(config.uiText.malformedURLError);
+            anError(config.strings.malformedURLError);
           }
           xhr.responseType = "blob";
           xhr.setRequestHeader("Accept", "image/*,*/*;q=0.9");
@@ -466,8 +526,8 @@ export default (function (window, document, undefined) {
       // From http://stackoverflow.com/a/19709846
       return (
         new RegExp("^(?:[a-z]+:)?//", "i").test(url) ||
-        url[0] === "/" ||
-        url.slice(0, 5) === "blob:"
+        url[0] == "/" ||
+        url.slice(0, 5) == "blob:"
       );
     }
 
@@ -519,9 +579,14 @@ export default (function (window, document, undefined) {
           onFullScreenChange,
           false
         );
-        window.addEventListener("resize", onDocumentResize, false);
-        window.addEventListener("orientationchange", onDocumentResize, false);
-        if (!config.disableKeyboardCtrl) {
+        if (typeof ResizeObserver === "function") {
+          resizeObserver = new ResizeObserver(onDocumentResize);
+          resizeObserver.observe(container);
+        } else {
+          window.addEventListener("resize", onDocumentResize, false);
+          window.addEventListener("orientationchange", onDocumentResize, false);
+        }
+        if (config.disableKeyboardCtrl != 0) {
           container.addEventListener("keydown", onDocumentKeyPress, false);
           container.addEventListener("keyup", onDocumentKeyUp, false);
           container.addEventListener("blur", clearKeys, false);
@@ -547,7 +612,10 @@ export default (function (window, document, undefined) {
       }
 
       renderInit();
-      setHfov(config.hfov); // possibly adapt hfov after configuration and canvas is complete; prevents empty space on top or bottom by zomming out too much
+      setHfov(config.hfov); // Possibly adapt HFOV after configuration and canvas is complete; prevents empty space on top or bottom by zooming out too much
+      setTimeout(function () {
+        isTimedOut = true;
+      }, 500);
     }
 
     /**
@@ -556,7 +624,7 @@ export default (function (window, document, undefined) {
      * @private
      * @param {Image} image - Image to read XMP metadata from.
      */
-    function parseGPanoXMP(image) {
+    function parseGPanoXMP(image, url) {
       var reader = new FileReader();
       reader.addEventListener("loadend", function () {
         var img = reader.result;
@@ -568,7 +636,7 @@ export default (function (window, document, undefined) {
         ) {
           var flagIndex = img.indexOf("\xff\xc2");
           if (flagIndex < 0 || flagIndex > 65536)
-            anError(config.uiText.iOS8WebGLError);
+            anError(config.strings.iOS8WebGLError);
         }
 
         var start = img.indexOf("<x:xmpmeta");
@@ -605,6 +673,9 @@ export default (function (window, document, undefined) {
             heading: getTag("GPano:PoseHeadingDegrees"),
             horizonPitch: getTag("GPano:PosePitchDegrees"),
             horizonRoll: getTag("GPano:PoseRollDegrees"),
+            pitch: getTag("GPano:InitialViewPitchDegrees"),
+            yaw: getTag("GPano:InitialViewHeadingDegrees"),
+            hfov: getTag("GPano:InitialHorizontalFOVDegrees"),
           };
 
           if (
@@ -641,18 +712,57 @@ export default (function (window, document, undefined) {
                 config.horizonRoll = xmp.horizonRoll;
             }
 
-            // TODO: add support for initial view settings
+            if (
+              xmp.pitch != null &&
+              specifiedPhotoSphereExcludes.indexOf("pitch") < 0
+            )
+              config.pitch = xmp.pitch;
+            if (
+              xmp.yaw != null &&
+              specifiedPhotoSphereExcludes.indexOf("yaw") < 0
+            )
+              config.yaw = xmp.yaw;
+            if (
+              xmp.hfov != null &&
+              specifiedPhotoSphereExcludes.indexOf("hfov") < 0
+            )
+              config.hfov = xmp.hfov;
           }
         }
 
         // Load panorama
         panoImage.src = window.URL.createObjectURL(image);
+        panoImage.onerror = function () {
+          // If the image fails to load, we check the Content Security Policy
+          // headers and see if they block loading images as blobs. If they
+          // do, we load the image directly from the URL. While this should
+          // allow the image to load, it does prevent parsing of XMP data.
+          function getCspHeaders() {
+            if (!window.fetch) return null;
+            return window.fetch(document.location.href).then(function (resp) {
+              return resp.headers.get("Content-Security-Policy");
+            });
+          }
+          getCspHeaders().then(function (cspHeaders) {
+            if (cspHeaders) {
+              var invalidImgSource = cspHeaders.split(";").find(function (p) {
+                var matchstring = p.match(/img-src(.*)/);
+                if (matchstring) {
+                  return !matchstring[1].includes("blob");
+                }
+              });
+              if (invalidImgSource) {
+                console.log("CSP blocks blobs; reverting to URL.");
+                panoImage.crossOrigin = config.crossOrigin;
+                panoImage.src = url;
+              }
+            }
+          });
+        };
       });
-      if (reader.readAsBinaryString !== undefined) {
+      if (reader.readAsBinaryString !== undefined)
         reader.readAsBinaryString(image);
-      } else {
-        reader.readAsText(image);
-      }
+      else reader.readAsText(image);
     }
 
     /**
@@ -662,7 +772,7 @@ export default (function (window, document, undefined) {
      *      generic WebGL error is displayed.
      */
     function anError(errorMsg) {
-      if (errorMsg === undefined) errorMsg = config.uiText.genericWebGLError;
+      if (errorMsg === undefined) errorMsg = config.strings.genericWebGLError;
       infoDisplay.errorMsg.innerHTML = "<p>" + errorMsg + "</p>";
       controls.load.style.display = "none";
       infoDisplay.load.box.style.display = "none";
@@ -685,6 +795,42 @@ export default (function (window, document, undefined) {
         renderContainer.style.display = "block";
         fireEvent("errorcleared");
       }
+    }
+
+    /**
+     * Displays an interaction message.
+     * @private
+     * @param {string} msg - Message to display.
+     */
+    function showInteractionMessage(interactionMsg) {
+      infoDisplay.interactionMsg.style.opacity = 1;
+
+      infoDisplay.interactionMsg.innerHTML = "<p>" + interactionMsg + "</p>";
+      infoDisplay.interactionMsg.style.display = "table";
+      fireEvent("messageshown");
+
+      clearTimeout(infoDisplay.interactionMsg.timeout);
+      infoDisplay.interactionMsg.removeEventListener(
+        "transitionend",
+        clearInteractionMessage
+      );
+      infoDisplay.interactionMsg.timeout = setTimeout(function () {
+        infoDisplay.interactionMsg.style.opacity = 0;
+        infoDisplay.interactionMsg.addEventListener(
+          "transitionend",
+          clearInteractionMessage
+        );
+      }, 2000);
+    }
+
+    /**
+     * Hides interaction message display.
+     * @private
+     */
+    function clearInteractionMessage() {
+      infoDisplay.interactionMsg.style.opacity = 0;
+      infoDisplay.interactionMsg.style.display = "none";
+      fireEvent("messagecleared");
     }
 
     /**
@@ -737,7 +883,7 @@ export default (function (window, document, undefined) {
       container.focus();
 
       // Only do something if the panorama is loaded
-      if (!loaded || !config.draggable) {
+      if (!loaded || !config.draggable || config.draggingHotSpot) {
         return;
       }
 
@@ -764,7 +910,7 @@ export default (function (window, document, undefined) {
       // Turn off auto-rotation if enabled
       stopAnimation();
 
-      stopOrientation();
+      //stopOrientation();
       config.roll = 0;
 
       speed.hfov = 0;
@@ -830,20 +976,25 @@ export default (function (window, document, undefined) {
      * @param {MouseEvent} event - Document mouse move event.
      */
     function onDocumentMouseMove(event) {
-      if (isUserInteracting && loaded) {
+      if (draggingHotSpot) {
+        moveHotSpot(draggingHotSpot, event);
+      } else if (isUserInteracting && loaded) {
         latestInteraction = Date.now();
         var canvas = renderer.getCanvas();
         var canvasWidth = canvas.clientWidth,
           canvasHeight = canvas.clientHeight;
         var pos = mousePosition(event);
         //TODO: This still isn't quite right
+        var touchmovePanSpeedCoeff = config.touchPanSpeedCoeffFactor;
+
         var yaw =
-          ((((Math.atan((onPointerDownPointerX / canvasWidth) * 2 - 1) -
+          (((((Math.atan((onPointerDownPointerX / canvasWidth) * 2 - 1) -
             Math.atan((pos.x / canvasWidth) * 2 - 1)) *
             180) /
             Math.PI) *
             config.hfov) /
-            90 +
+            90) *
+            touchmovePanSpeedCoeff +
           onPointerDownYaw;
         speed.yaw = ((yaw - config.yaw) % 360) * 0.2;
         config.yaw = yaw;
@@ -858,12 +1009,13 @@ export default (function (window, document, undefined) {
           Math.PI;
 
         var pitch =
-          ((((Math.atan((pos.y / canvasHeight) * 2 - 1) -
+          (((((Math.atan((pos.y / canvasHeight) * 2 - 1) -
             Math.atan((onPointerDownPointerY / canvasHeight) * 2 - 1)) *
             180) /
             Math.PI) *
             vfov) /
-            90 +
+            90) *
+            touchmovePanSpeedCoeff +
           onPointerDownPitch;
         speed.pitch = (pitch - config.pitch) * 0.2;
         config.pitch = pitch;
@@ -875,6 +1027,10 @@ export default (function (window, document, undefined) {
      * @private
      */
     function onDocumentMouseUp(event) {
+      if (draggingHotSpot && draggingHotSpot.dragHandlerFunc)
+        draggingHotSpot.dragHandlerFunc(event, draggingHotSpot.dragHandlerArgs);
+      draggingHotSpot = null;
+
       if (!isUserInteracting) {
         return;
       }
@@ -899,14 +1055,14 @@ export default (function (window, document, undefined) {
      */
     function onDocumentTouchStart(event) {
       // Only do something if the panorama is loaded
-      if (!loaded || !config.draggable) {
+      if (!loaded || !config.draggable || draggingHotSpot) {
         return;
       }
 
       // Turn off auto-rotation if enabled
       stopAnimation();
 
-      stopOrientation();
+      //stopOrientation();
       config.roll = 0;
 
       speed.hfov = 0;
@@ -917,7 +1073,7 @@ export default (function (window, document, undefined) {
       onPointerDownPointerX = pos0.x;
       onPointerDownPointerY = pos0.y;
 
-      if (event.targetTouches.length === 2) {
+      if (event.targetTouches.length == 2) {
         // Down pointer is the center of the two fingers
         var pos1 = mousePosition(event.targetTouches[1]);
         onPointerDownPointerX += (pos1.x - pos0.x) * 0.5;
@@ -949,7 +1105,7 @@ export default (function (window, document, undefined) {
       }
 
       // Override default action
-      event.preventDefault();
+      if (!config.dragConfirm) event.preventDefault();
       if (loaded) {
         latestInteraction = Date.now();
       }
@@ -958,10 +1114,7 @@ export default (function (window, document, undefined) {
         var clientX = pos0.x;
         var clientY = pos0.y;
 
-        if (
-          event.targetTouches.length === 2 &&
-          onPointerDownPointerDist != -1
-        ) {
+        if (event.targetTouches.length == 2 && onPointerDownPointerDist != -1) {
           var pos1 = mousePosition(event.targetTouches[1]);
           clientX += (pos1.x - pos0.x) * 0.5;
           clientY += (pos1.y - pos0.y) * 0.5;
@@ -983,17 +1136,53 @@ export default (function (window, document, undefined) {
         var touchmovePanSpeedCoeff =
           (config.hfov / 360) * config.touchPanSpeedCoeffFactor;
 
-        var yaw =
-          (onPointerDownPointerX - clientX) * touchmovePanSpeedCoeff +
-          onPointerDownYaw;
-        speed.yaw = ((yaw - config.yaw) % 360) * 0.2;
-        config.yaw = yaw;
+        if (
+          !fullscreenActive &&
+          (config.dragConfirm == "both" || config.dragConfirm == "yaw") &&
+          event.targetTouches.length != 2
+        ) {
+          /*if (onPointerDownPointerX != clientX) {
+                        if (config.dragConfirm == 'yaw')
+                            showInteractionMessage(config.strings.twoTouchXActivate);
+                        else
+                            showInteractionMessage(config.strings.twoTouchActivate);
+                    }*/
+        } else {
+          var yaw =
+            (onPointerDownPointerX - clientX) * touchmovePanSpeedCoeff +
+            onPointerDownYaw;
+          speed.yaw = ((yaw - config.yaw) % 360) * 0.2;
+          config.yaw = yaw;
+        }
 
-        var pitch =
-          (clientY - onPointerDownPointerY) * touchmovePanSpeedCoeff +
-          onPointerDownPitch;
-        speed.pitch = (pitch - config.pitch) * 0.2;
-        config.pitch = pitch;
+        if (
+          !fullscreenActive &&
+          (config.dragConfirm == "both" || config.dragConfirm == "pitch") &&
+          event.targetTouches.length != 2
+        ) {
+          /*if (onPointerDownPointerY != clientY) {
+                        if (config.dragConfirm == 'pitch')
+                            showInteractionMessage(config.strings.twoTouchYActivate);
+                        else
+                            showInteractionMessage(config.strings.twoTouchActivate);
+                    }*/
+        } else {
+          var pitch =
+            (clientY - onPointerDownPointerY) * touchmovePanSpeedCoeff +
+            onPointerDownPitch;
+          speed.pitch = (pitch - config.pitch) * 0.2;
+          config.pitch = pitch;
+        }
+
+        if (
+          (config.dragConfirm == "yaw" ||
+            config.dragConfirm == "pitch" ||
+            config.dragConfirm == "both") &&
+          event.targetTouches.length == 2
+        ) {
+          //clearInteractionMessage();
+          event.preventDefault();
+        }
       }
     }
 
@@ -1002,6 +1191,8 @@ export default (function (window, document, undefined) {
      * @private
      */
     function onDocumentTouchEnd() {
+      draggingHotSpot = null;
+
       isUserInteracting = false;
       if (Date.now() - latestInteraction > 150) {
         speed.pitch = speed.yaw = 0;
@@ -1020,7 +1211,7 @@ export default (function (window, document, undefined) {
      * @param {PointerEvent} event - Document pointer down event.
      */
     function onDocumentPointerDown(event) {
-      if (event.pointerType === "touch") {
+      if (event.pointerType == "touch") {
         // Only do something if the panorama is loaded
         if (!loaded || !config.draggable) return;
         pointerIDs.push(event.pointerId);
@@ -1040,10 +1231,15 @@ export default (function (window, document, undefined) {
      * @param {PointerEvent} event - Document pointer move event.
      */
     function onDocumentPointerMove(event) {
-      if (event.pointerType === "touch") {
+      if (event.pointerType == "touch") {
+        if (draggingHotSpot) {
+          moveHotSpot(draggingHotSpot, event);
+          return;
+        }
+
         if (!config.draggable) return;
         for (var i = 0; i < pointerIDs.length; i++) {
-          if (event.pointerId === pointerIDs[i]) {
+          if (event.pointerId == pointerIDs[i]) {
             pointerCoordinates[i].clientX = event.clientX;
             pointerCoordinates[i].clientY = event.clientY;
             event.targetTouches = pointerCoordinates;
@@ -1061,10 +1257,14 @@ export default (function (window, document, undefined) {
      * @param {PointerEvent} event - Document pointer up event.
      */
     function onDocumentPointerUp(event) {
-      if (event.pointerType === "touch") {
+      if (draggingHotSpot && draggingHotSpot.dragHandlerFunc)
+        draggingHotSpot.dragHandlerFunc(event, draggingHotSpot.dragHandlerArgs);
+      draggingHotSpot = null;
+
+      if (event.pointerType == "touch") {
         var defined = false;
         for (var i = 0; i < pointerIDs.length; i++) {
-          if (event.pointerId === pointerIDs[i]) pointerIDs[i] = undefined;
+          if (event.pointerId == pointerIDs[i]) pointerIDs[i] = undefined;
           if (pointerIDs[i]) defined = true;
         }
         if (!defined) {
@@ -1076,19 +1276,51 @@ export default (function (window, document, undefined) {
       }
     }
 
+    function findUpTag(el, tag) {
+      while (el.parentNode) {
+        el = el.parentNode;
+        if (el.classList !== undefined) {
+          if (el.classList.contains(tag)) return true;
+        }
+      }
+      return false;
+    }
+
     /**
      * Event handler for mouse wheel. Changes zoom.
      * @private
      * @param {WheelEvent} event - Document mouse wheel event.
      */
+    var wheel_lookat = true,
+      wheel_lookat_anim = false,
+      wheel_dir = "";
     function onDocumentMouseWheel(event) {
-      // Only do something if the panorama is loaded and mouse wheel zoom is enabled
+      if (wheel_lookat_anim) {
+        return;
+      }
       if (
-        !loaded ||
-        (config.mouseZoom === "fullscreenonly" && !fullscreenActive)
+        event.srcElement.parentNode.classList.contains("poi_embed_link") ||
+        event.srcElement.parentNode.classList.contains("poi_embed_html") ||
+        findUpTag(event.srcElement, "box_poi")
       ) {
         return;
       }
+      // Only do something if the panorama is loaded and mouse wheel zoom is enabled
+      if (
+        !loaded ||
+        (config.mouseZoom == "fullscreenonly" && !fullscreenActive)
+      ) {
+        return;
+      }
+
+      // Ctrl for zoom
+      if (!fullscreenActive && config.mouseZoom == "ctrl" && !event.ctrlKey) {
+        var keyname =
+          navigator.platform.indexOf("Mac") != -1 ? "control" : "ctrl";
+        //showInteractionMessage(config.strings.ctrlZoomActivate.replace('%s', '<kbd class="pnlm-outline">' + keyname + '</kbd>'));
+        return;
+      }
+      //clearInteractionMessage();
 
       event.preventDefault();
 
@@ -1096,18 +1328,101 @@ export default (function (window, document, undefined) {
       stopAnimation();
       latestInteraction = Date.now();
 
+      if (window.zoom_to_pointer) {
+        var coords = mouseEventToCoords(event);
+        if (event.wheelDeltaY) {
+          if (event.wheelDelta > 0 && wheel_dir != "up") {
+            wheel_dir = "up";
+          } else if (event.wheelDelta < 0 && wheel_dir != "down") {
+            wheel_dir = "down";
+          }
+        } else if (event.wheelDelta) {
+          if (event.wheelDelta > 0 && wheel_dir != "up") {
+            wheel_dir = "up";
+          } else if (event.wheelDelta < 0 && wheel_dir != "down") {
+            wheel_dir = "down";
+          }
+        } else if (event.detail) {
+          if (event.detail < 0 && wheel_dir != "up") {
+            wheel_dir = "up";
+          } else if (event.detail > 0 && wheel_dir != "down") {
+            wheel_dir = "down";
+          }
+        }
+        if (
+          config.hfov >= origHfov &&
+          wheel_dir == "down" &&
+          !wheel_lookat &&
+          window.zoom_to_pointer
+        ) {
+          wheel_lookat = true;
+        }
+      } else {
+        wheel_lookat = false;
+      }
+      var anim_duration = 250;
+      var zoom_friction = config.zoom_friction;
+
       if (event.wheelDeltaY) {
         // WebKit
-        setHfov(config.hfov - event.wheelDeltaY * 0.05);
-        speed.hfov = event.wheelDelta < 0 ? 1 : -1;
+        if (wheel_lookat && wheel_dir == "up") {
+          wheel_lookat_anim = true;
+          window.viewer_mov_follow_mouse = false;
+          window.viewer_mov_pos_change = false;
+          _this.lookAt(
+            coords[0],
+            coords[1],
+            config.hfov - event.wheelDeltaY * 0.5,
+            anim_duration
+          );
+          setTimeout(function () {
+            wheel_lookat_anim = false;
+          }, anim_duration);
+          wheel_lookat = false;
+        } else {
+          setHfov(config.hfov - event.wheelDeltaY * zoom_friction);
+        }
+        speed.hfov = event.wheelDeltaY < 0 ? 0.15 : -0.15;
       } else if (event.wheelDelta) {
         // Opera / Explorer 9
-        setHfov(config.hfov - event.wheelDelta * 0.05);
-        speed.hfov = event.wheelDelta < 0 ? 1 : -1;
+        if (wheel_lookat && wheel_dir == "up") {
+          wheel_lookat_anim = true;
+          window.viewer_mov_follow_mouse = false;
+          window.viewer_mov_pos_change = false;
+          _this.lookAt(
+            coords[0],
+            coords[1],
+            config.hfov - event.wheelDelta * 0.5,
+            anim_duration
+          );
+          setTimeout(function () {
+            wheel_lookat_anim = false;
+          }, anim_duration);
+          wheel_lookat = false;
+        } else {
+          setHfov(config.hfov - event.wheelDeltaY * zoom_friction);
+        }
+        speed.hfov = event.wheelDelta < 0 ? 0.15 : -0.15;
       } else if (event.detail) {
         // Firefox
-        setHfov(config.hfov + event.detail * 1.5);
-        speed.hfov = event.detail > 0 ? 1 : -1;
+        if (wheel_lookat && wheel_dir == "up") {
+          wheel_lookat_anim = true;
+          window.viewer_mov_follow_mouse = false;
+          window.viewer_mov_pos_change = false;
+          _this.lookAt(
+            coords[0],
+            coords[1],
+            config.hfov + event.detail * 5,
+            anim_duration
+          );
+          setTimeout(function () {
+            wheel_lookat_anim = false;
+          }, anim_duration);
+          wheel_lookat = false;
+        } else {
+          setHfov(config.hfov + event.detail * (zoom_friction * 10));
+        }
+        speed.hfov = event.detail > 0 ? 0.15 : -0.15;
       }
       animateInit();
     }
@@ -1128,19 +1443,57 @@ export default (function (window, document, undefined) {
       // Record key pressed
       var keynumber = event.which || event.keycode;
 
+      if (window.poi_box_open) return;
+
       // Override default action for keys that are used
       if (config.capturedKeyNumbers.indexOf(keynumber) < 0) return;
+      if (
+        !fullscreenActive &&
+        (keynumber == 16 || keynumber == 17) &&
+        config.mouseZoom == "ctrl"
+      )
+        // Disable ctrl / shift zoom when holding the ctrl key is required for
+        // scroll wheel zooming
+        return;
       event.preventDefault();
 
-      // If escape key is pressed
-      if (keynumber === 27) {
-        // If in fullscreen mode
-        if (fullscreenActive) {
-          toggleFullscreen();
-        }
-      } else {
-        // Change key
-        changeKey(keynumber, true);
+      switch (config.disableKeyboardCtrl) {
+        case 1:
+          // If escape key is pressed
+          if (keynumber == 27) {
+            // If in fullscreen mode
+            if (fullscreenActive) {
+              toggleFullscreen();
+            }
+          } else if (keynumber == 90) {
+            // If "z" is pressed
+            goto_prev_room();
+          } else if (keynumber == 88) {
+            // If "x" is pressed
+            goto_next_room();
+          } else {
+            // Change key
+            changeKey(keynumber, true);
+          }
+          break;
+        case 2:
+          // If escape key is pressed
+          if (keynumber == 27) {
+            // If in fullscreen mode
+            if (fullscreenActive) {
+              toggleFullscreen();
+            }
+          } else if (keynumber == 38) {
+            // If "up" is pressed
+            goto_next_room();
+          } else if (keynumber == 40) {
+            // If "down" is pressed
+            goto_prev_room();
+          } else {
+            // Change key
+            changeKey(keynumber, true);
+          }
+          break;
       }
     }
 
@@ -1267,6 +1620,8 @@ export default (function (window, document, undefined) {
       }
 
       if (keyChanged && value) {
+        window.viewer_mov_follow_mouse = false;
+        window.viewer_mov_pos_change = false;
         if (typeof performance !== "undefined" && performance.now()) {
           prevTime = performance.now();
         } else {
@@ -1302,18 +1657,18 @@ export default (function (window, document, undefined) {
       if (prevTime === undefined) {
         prevTime = newTime;
       }
-      var diff = ((newTime - prevTime) * config.hfov) / 1700;
-      diff = Math.min(diff, 1.0);
+      var diff = ((newTime - prevTime) * config.hfov) / 1200;
+      diff = Math.min(diff, 10.0); // Avoid jump if something goes wrong with time diff
 
       // If minus key is down
       if (keysDown[0] && config.keyboardZoom === true) {
-        setHfov(config.hfov + (speed.hfov * 0.8 + 0.5) * diff);
+        setHfov(config.hfov + (speed.hfov * 0.8 + 0.15) * diff);
         isKeyDown = true;
       }
 
       // If plus key is down
       if (keysDown[1] && config.keyboardZoom === true) {
-        setHfov(config.hfov + (speed.hfov * 0.8 - 0.2) * diff);
+        setHfov(config.hfov + (speed.hfov * 0.8 - 0.15) * diff);
         isKeyDown = true;
       }
 
@@ -1413,6 +1768,10 @@ export default (function (window, document, undefined) {
         }
         // Zoom
         if (!keysDown[0] && !keysDown[1] && !animatedMove.hfov) {
+          if (config.hfov > 90) {
+            // Slow down faster for wider HFOV
+            slowDownFactor *= 1 - (config.hfov - 90) / 90;
+          }
           setHfov(config.hfov + speed.hfov * diff * slowDownFactor);
         }
       }
@@ -1505,6 +1864,27 @@ export default (function (window, document, undefined) {
       animate();
     }
 
+    function sync_helper_svt() {
+      try {
+        if (window.sync_poi_embed_enabled) {
+          adjust_poi_embed_helpers_all();
+        }
+      } catch (e) {}
+      try {
+        if (window.sync_marker_embed_enabled) {
+          adjust_marker_embed_helpers_all();
+        }
+      } catch (e) {}
+      try {
+        if (window.sync_virtual_staging_enabled) {
+          sync_virtual_staging_view();
+        }
+      } catch (e) {}
+      try {
+        adjust_measurements();
+      } catch (e) {}
+    }
+
     /**
      * Animates view, using requestAnimationFrame to trigger rendering.
      * @private
@@ -1513,10 +1893,10 @@ export default (function (window, document, undefined) {
       if (destroyed) {
         return;
       }
-
       render();
       if (autoRotateStart) clearTimeout(autoRotateStart);
       if (isUserInteracting || orientation === true) {
+        sync_helper_svt();
         requestAnimationFrame(animate);
       } else if (
         keysDown[0] ||
@@ -1544,32 +1924,38 @@ export default (function (window, document, undefined) {
           Date.now() - latestInteraction > config.autoRotateInactivityDelay &&
           !config.autoRotate
         ) {
+          config.is_autorotating = true;
           config.autoRotate = autoRotateSpeed;
           _this.lookAt(origPitch, undefined, origHfov, 3000);
         }
+        sync_helper_svt();
         requestAnimationFrame(animate);
       } else if (
         renderer &&
         (renderer.isLoading() || (config.dynamic === true && update))
       ) {
+        sync_helper_svt();
         requestAnimationFrame(animate);
       } else {
-        fireEvent("animatefinished", {
-          pitch: _this.getPitch(),
-          yaw: _this.getYaw(),
-          hfov: _this.getHfov(),
-        });
+        if (_this.getPitch && _this.getYaw && _this.getHfov)
+          fireEvent("animatefinished", {
+            pitch: _this.getPitch(),
+            yaw: _this.getYaw(),
+            hfov: _this.getHfov(),
+          });
         animating = false;
         prevTime = undefined;
         var autoRotateStartTime =
           config.autoRotateInactivityDelay - (Date.now() - latestInteraction);
         if (autoRotateStartTime > 0) {
           autoRotateStart = setTimeout(function () {
+            config.is_autorotating = true;
             config.autoRotate = autoRotateSpeed;
             _this.lookAt(origPitch, undefined, origHfov, 3000);
             animateInit();
           }, autoRotateStartTime);
         } else if (config.autoRotateInactivityDelay >= 0 && autoRotateSpeed) {
+          config.is_autorotating = true;
           config.autoRotate = autoRotateSpeed;
           _this.lookAt(origPitch, undefined, origHfov, 3000);
           animateInit();
@@ -1589,9 +1975,9 @@ export default (function (window, document, undefined) {
 
         if (config.autoRotate !== false) {
           // When auto-rotating this check needs to happen first (see issue #764)
-          if (config.yaw > 180) {
+          if (config.yaw > 360) {
             config.yaw -= 360;
-          } else if (config.yaw < -180) {
+          } else if (config.yaw < -360) {
             config.yaw += 360;
           }
         }
@@ -1600,7 +1986,8 @@ export default (function (window, document, undefined) {
         tmpyaw = config.yaw;
 
         // Optionally avoid showing background (empty space) on left or right by adapting min/max yaw
-        var hoffcut = 0;
+        var hoffcut = 0,
+          voffcut = 0;
         if (config.avoidShowingBackground) {
           var hfov2 = config.hfov / 2,
             vfov2 =
@@ -1611,7 +1998,15 @@ export default (function (window, document, undefined) {
                 180) /
               Math.PI,
             transposed = config.vaov > config.haov;
-          if (!transposed) {
+          if (transposed) {
+            voffcut =
+              vfov2 *
+              (1 -
+                Math.min(
+                  Math.cos(((config.pitch - hfov2) / 180) * Math.PI),
+                  Math.cos(((config.pitch + hfov2) / 180) * Math.PI)
+                ));
+          } else {
             hoffcut =
               hfov2 *
               (1 -
@@ -1639,9 +2034,9 @@ export default (function (window, document, undefined) {
         if (!(config.autoRotate !== false)) {
           // When not auto-rotating, this check needs to happen after the
           // previous check (see issue #698)
-          if (config.yaw > 180) {
+          if (config.yaw > 360) {
             config.yaw -= 360;
-          } else if (config.yaw < -180) {
+          } else if (config.yaw < -360) {
             config.yaw += 360;
           }
         }
@@ -1692,6 +2087,36 @@ export default (function (window, document, undefined) {
             "rotate(" + (-config.yaw - config.northOffset) + "deg)";
           compass.style.webkitTransform =
             "rotate(" + (-config.yaw - config.northOffset) + "deg)";
+          try {
+            var compass_icon = document.getElementById("compass_icon");
+            compass_icon.style.transform =
+              "rotate(" + (-config.yaw - config.northOffset) + "deg)";
+            compass_icon.style.webkitTransform =
+              "rotate(" + (-config.yaw - config.northOffset) + "deg)";
+          } catch (e) {}
+          try {
+            var view = document.getElementsByClassName(
+              "pointer_" + config.id_room
+            );
+            var scale = view[0].getAttribute("data-scale");
+            var degree = config.northOffset + config.map_north - 90;
+            Array.prototype.forEach.call(view, function (el) {
+              el.style.transform =
+                "rotate(" + (config.yaw + degree) + "deg) scale(" + scale + ")";
+              el.style.webkitTransform =
+                "rotate(" + (config.yaw + degree) + "deg) scale(" + scale + ")";
+            });
+          } catch (e) {}
+          try {
+            var view_m = document.getElementById(
+              "map_tour_arrow_" + config.id_room
+            );
+            var degree_m = config.northOffset - 135;
+            view_m.style.transform =
+              "rotate(" + (config.yaw + degree_m) + "deg)";
+            view_m.style.webkitTransform =
+              "rotate(" + (config.yaw + degree_m) + "deg)";
+          } catch (e) {}
         }
       }
     }
@@ -1801,9 +2226,8 @@ export default (function (window, document, undefined) {
      * @param {DeviceOrientationEvent} event - Device orientation event.
      */
     function orientationListener(e) {
-      if (e.hasOwnProperty("requestPermission")) e.requestPermission();
       var q = computeQuaternion(e.alpha, e.beta, e.gamma).toEulerAngles();
-      if (typeof orientation === "number" && orientation < 10) {
+      if (typeof orientation == "number" && orientation < 10) {
         // This kludge is necessary because iOS sometimes provides a few stale
         // device orientation events when the listener is removed and then
         // readded. Thus, we skip the first 10 events to prevent this from
@@ -1852,16 +2276,16 @@ export default (function (window, document, undefined) {
         // Panorama not loaded
 
         // Display error if there is a bad texture
-        if (event.type === "webgl error" || event.type === "no webgl") {
+        if (event.type == "webgl error" || event.type == "no webgl") {
           anError();
-        } else if (event.type === "webgl size error") {
+        } else if (event.type == "webgl size error") {
           anError(
-            config.uiText.textureSizeError
+            config.strings.textureSizeError
               .replace("%s", event.width)
               .replace("%s", event.maxWidth)
           );
         } else {
-          anError(config.uiText.unknownError);
+          anError(config.strings.unknownError);
           throw event;
         }
       }
@@ -1869,7 +2293,7 @@ export default (function (window, document, undefined) {
 
     /**
      * Triggered when render initialization finishes. Handles fading between
-     * scenes as well as showing the compass and hotspots and hiding the loading
+     * scenes as well as showing the compass and hot spots and hiding the loading
      * display.
      * @private
      */
@@ -1912,14 +2336,18 @@ export default (function (window, document, undefined) {
     /**
      * Creates hot spot element for the current scene.
      * @private
-     * @param {Object} hs - The configuration for the hotspot
+     * @param {Object} hs - The configuration for the hot spot
      */
+    var drag_p = false,
+      start_drag,
+      end_drag;
     function createHotSpot(hs) {
       // Make sure hot spot pitch and yaw are numbers
       hs.pitch = Number(hs.pitch) || 0;
       hs.yaw = Number(hs.yaw) || 0;
 
       var div = document.createElement("div");
+      div.tabIndex = -1;
       div.className = "pnlm-hotspot-base";
       if (hs.cssClass) div.className += " " + hs.cssClass;
       else
@@ -1938,34 +2366,38 @@ export default (function (window, document, undefined) {
         video.src = sanitizeURL(vidp);
         video.controls = true;
         video.style.width = hs.width + "px";
-        renderContainer.appendChild(div);
+        uiContainer.appendChild(div);
         span.appendChild(video);
       } else if (hs.image) {
         var imgp = hs.image;
         if (config.basePath && !absoluteURL(imgp))
           imgp = config.basePath + imgp;
         a = document.createElement("a");
-        a.href = sanitizeURL(hs.URL ? hs.URL : imgp);
-        a.target = "_blank";
+        a.href = sanitizeURL(hs.URL ? hs.URL : imgp, true);
+        if (config.targetBlank) {
+          a.target = "_blank";
+          a.rel = "noopener";
+        }
         span.appendChild(a);
         var image = document.createElement("img");
         image.src = sanitizeURL(imgp);
         image.style.width = hs.width + "px";
         image.style.paddingTop = "5px";
-        renderContainer.appendChild(div);
+        uiContainer.appendChild(div);
         a.appendChild(image);
         span.style.maxWidth = "initial";
       } else if (hs.URL) {
         a = document.createElement("a");
-        a.href = sanitizeURL(hs.URL);
+        a.href = sanitizeURL(hs.URL, true);
         if (hs.attributes) {
           for (var key in hs.attributes) {
             a.setAttribute(key, hs.attributes[key]);
           }
-        } else {
+        } else if (config.targetBlank) {
           a.target = "_blank";
+          a.rel = "noopener";
         }
-        renderContainer.appendChild(a);
+        uiContainer.appendChild(a);
         div.className += " pnlm-pointer";
         span.className += " pnlm-pointer";
         a.appendChild(div);
@@ -1986,7 +2418,7 @@ export default (function (window, document, undefined) {
           div.className += " pnlm-pointer";
           span.className += " pnlm-pointer";
         }
-        renderContainer.appendChild(div);
+        uiContainer.appendChild(div);
       }
 
       if (hs.createTooltipFunc) {
@@ -1999,18 +2431,465 @@ export default (function (window, document, undefined) {
           -(span.scrollWidth - div.offsetWidth) / 2 + "px";
         span.style.marginTop = -span.scrollHeight - 12 + "px";
       }
+
       if (hs.clickHandlerFunc) {
+        if (hs.object == "poi_embed" && hs.type == "object3d") {
+          var embed_params = hs.clickHandlerArgs.embed_params;
+          if (
+            embed_params != "" &&
+            embed_params !== undefined &&
+            embed_params !== null
+          ) {
+            var tmp = embed_params.split(",");
+            var interaction = tmp[1];
+          } else {
+            var interaction = 0;
+          }
+        } else {
+          var interaction = 0;
+        }
+        if (
+          hs.object == "poi_embed" &&
+          (hs.type == "gallery" || hs.type == "link") &&
+          hs.transform3d == 1
+        ) {
+          div.addEventListener(
+            "click",
+            function (e) {
+              hs.clickHandlerFunc(e, hs.clickHandlerArgs);
+            },
+            false
+          );
+          if (
+            document.documentElement.style.pointerAction === "" &&
+            document.documentElement.style.touchAction === ""
+          ) {
+            div.addEventListener(
+              "pointerup",
+              function (e) {
+                hs.clickHandlerFunc(e, hs.clickHandlerArgs);
+              },
+              false
+            );
+          } else {
+            div.addEventListener(
+              "touchend",
+              function (e) {
+                hs.clickHandlerFunc(e, hs.clickHandlerArgs);
+              },
+              false
+            );
+          }
+        } else {
+          div.addEventListener(
+            "mousedown",
+            function (e) {
+              start_drag = new Date().getTime();
+              drag_p = false;
+              try {
+                if (
+                  hs.object == "poi_embed" &&
+                  hs.type == "selection" &&
+                  window.draw_polygon_mode == 1 &&
+                  "p" + window.poi_id_edit == hs.id
+                )
+                  interaction = 1;
+              } catch (e) {}
+              try {
+                if (
+                  hs.object == "marker_embed" &&
+                  hs.type == "selection" &&
+                  window.draw_polygon_mode == 1 &&
+                  "m" + window.marker_id_edit == hs.id
+                )
+                  interaction = 1;
+              } catch (e) {}
+              if (
+                interaction == 0 &&
+                !e.target.classList.contains("vjs-volume-level") &&
+                !e.target.classList.contains("vjs-volume-control") &&
+                !e.target.classList.contains("vjs-control")
+              ) {
+                onDocumentMouseDown(e);
+              }
+            },
+            false
+          );
+          div.addEventListener(
+            "mousemove",
+            function (e) {
+              end_drag = new Date().getTime();
+              drag_p = true;
+              try {
+                if (
+                  hs.object == "poi_embed" &&
+                  hs.type == "selection" &&
+                  window.draw_polygon_mode == 1 &&
+                  "p" + window.poi_id_edit == hs.id
+                )
+                  interaction = 1;
+              } catch (e) {}
+              try {
+                if (
+                  hs.object == "marker_embed" &&
+                  hs.type == "selection" &&
+                  window.draw_polygon_mode == 1 &&
+                  "m" + window.marker_id_edit == hs.id
+                )
+                  interaction = 1;
+              } catch (e) {}
+              if (
+                interaction == 0 &&
+                !e.target.classList.contains("vjs-volume-level") &&
+                !e.target.classList.contains("vjs-volume-control") &&
+                !e.target.classList.contains("vjs-control")
+              ) {
+                onDocumentMouseMove(e);
+              }
+            },
+            false
+          );
+          div.addEventListener(
+            "click",
+            function (e) {
+              var diff_drag = end_drag - start_drag;
+              if (drag_p == false || diff_drag < 200) {
+                if (
+                  !(
+                    (hs.object == "poi_embed" || hs.object == "marker_embed") &&
+                    hs.type == "selection" &&
+                    e.target.nodeName == "CANVAS" &&
+                    location.pathname.toString().includes("/viewer/")
+                  )
+                ) {
+                  hs.clickHandlerFunc(e, hs.clickHandlerArgs);
+                }
+              }
+              try {
+                if (
+                  hs.object == "poi_embed" &&
+                  hs.type == "selection" &&
+                  window.draw_polygon_mode == 1 &&
+                  "p" + window.poi_id_edit == hs.id
+                )
+                  interaction = 1;
+              } catch (e) {}
+              try {
+                if (
+                  hs.object == "marker_embed" &&
+                  hs.type == "selection" &&
+                  window.draw_polygon_mode == 1 &&
+                  "m" + window.marker_id_edit == hs.id
+                )
+                  interaction = 1;
+              } catch (e) {}
+              if (
+                interaction == 0 &&
+                !e.target.classList.contains("vjs-volume-level") &&
+                !e.target.classList.contains("vjs-volume-control") &&
+                !e.target.classList.contains("vjs-control")
+              ) {
+                onDocumentMouseUp(e);
+              }
+            },
+            false
+          );
+          if (
+            document.documentElement.style.pointerAction === "" &&
+            document.documentElement.style.touchAction === ""
+          ) {
+            div.addEventListener(
+              "pointerdown",
+              function (e) {
+                start_drag = new Date().getTime();
+                drag_p = false;
+                try {
+                  if (
+                    hs.object == "poi_embed" &&
+                    hs.type == "selection" &&
+                    window.draw_polygon_mode == 1 &&
+                    "p" + window.poi_id_edit == hs.id
+                  )
+                    interaction = 1;
+                } catch (e) {}
+                try {
+                  if (
+                    hs.object == "marker_embed" &&
+                    hs.type == "selection" &&
+                    window.draw_polygon_mode == 1 &&
+                    "m" + window.marker_id_edit == hs.id
+                  )
+                    interaction = 1;
+                } catch (e) {}
+                if (interaction == 0) {
+                  onDocumentPointerDown(e);
+                }
+              },
+              false
+            );
+            div.addEventListener(
+              "pointermove",
+              function (e) {
+                end_drag = new Date().getTime();
+                drag_p = true;
+                try {
+                  if (
+                    hs.object == "poi_embed" &&
+                    hs.type == "selection" &&
+                    window.draw_polygon_mode == 1 &&
+                    "p" + window.poi_id_edit == hs.id
+                  )
+                    interaction = 1;
+                } catch (e) {}
+                try {
+                  if (
+                    hs.object == "marker_embed" &&
+                    hs.type == "selection" &&
+                    window.draw_polygon_mode == 1 &&
+                    "m" + window.marker_id_edit == hs.id
+                  )
+                    interaction = 1;
+                } catch (e) {}
+                if (
+                  interaction == 0 &&
+                  !e.target.classList.contains("vjs-volume-level") &&
+                  !e.target.classList.contains("vjs-volume-control") &&
+                  !e.target.classList.contains("vjs-control")
+                ) {
+                  onDocumentPointerMove(e);
+                }
+              },
+              false
+            );
+            div.addEventListener(
+              "pointerup",
+              function (e) {
+                var diff_drag = end_drag - start_drag;
+                if (drag_p == false || diff_drag < 200) {
+                  if (
+                    !(
+                      (hs.object == "poi_embed" ||
+                        hs.object == "marker_embed") &&
+                      hs.type == "selection" &&
+                      e.target.nodeName == "CANVAS" &&
+                      location.pathname.toString().includes("/viewer/")
+                    )
+                  ) {
+                    hs.clickHandlerFunc(e, hs.clickHandlerArgs);
+                  }
+                }
+                try {
+                  if (
+                    hs.object == "poi_embed" &&
+                    hs.type == "selection" &&
+                    window.draw_polygon_mode == 1 &&
+                    "p" + window.poi_id_edit == hs.id
+                  )
+                    interaction = 1;
+                } catch (e) {}
+                try {
+                  if (
+                    hs.object == "marker_embed" &&
+                    hs.type == "selection" &&
+                    window.draw_polygon_mode == 1 &&
+                    "m" + window.marker_id_edit == hs.id
+                  )
+                    interaction = 1;
+                } catch (e) {}
+                if (
+                  interaction == 0 &&
+                  !e.target.classList.contains("vjs-volume-level") &&
+                  !e.target.classList.contains("vjs-volume-control") &&
+                  !e.target.classList.contains("vjs-control")
+                ) {
+                  onDocumentPointerUp(e);
+                }
+              },
+              false
+            );
+          } else {
+            div.addEventListener(
+              "touchstart",
+              function (e) {
+                start_drag = new Date().getTime();
+                drag_p = false;
+                try {
+                  if (
+                    hs.object == "poi_embed" &&
+                    hs.type == "selection" &&
+                    window.draw_polygon_mode == 1 &&
+                    "p" + window.poi_id_edit == hs.id
+                  )
+                    interaction = 1;
+                } catch (e) {}
+                try {
+                  if (
+                    hs.object == "marker_embed" &&
+                    hs.type == "selection" &&
+                    window.draw_polygon_mode == 1 &&
+                    "m" + window.marker_id_edit == hs.id
+                  )
+                    interaction = 1;
+                } catch (e) {}
+                if (
+                  interaction == 0 &&
+                  !e.target.classList.contains("vjs-volume-level") &&
+                  !e.target.classList.contains("vjs-volume-control") &&
+                  !e.target.classList.contains("vjs-control")
+                ) {
+                  onDocumentTouchStart(e);
+                }
+              },
+              false
+            );
+            div.addEventListener(
+              "touchmove",
+              function (e) {
+                end_drag = new Date().getTime();
+                drag_p = true;
+                var diff_drag = end_drag - start_drag;
+                try {
+                  if (
+                    hs.object == "poi_embed" &&
+                    hs.type == "selection" &&
+                    window.draw_polygon_mode == 1 &&
+                    "p" + window.poi_id_edit == hs.id
+                  )
+                    interaction = 1;
+                } catch (e) {}
+                try {
+                  if (
+                    hs.object == "marker_embed" &&
+                    hs.type == "selection" &&
+                    window.draw_polygon_mode == 1 &&
+                    "m" + window.marker_id_edit == hs.id
+                  )
+                    interaction = 1;
+                } catch (e) {}
+                if (
+                  diff_drag > 200 &&
+                  interaction == 0 &&
+                  !e.target.classList.contains("vjs-volume-level") &&
+                  !e.target.classList.contains("vjs-volume-control") &&
+                  !e.target.classList.contains("vjs-control")
+                ) {
+                  onDocumentTouchMove(e);
+                }
+              },
+              false
+            );
+          }
+        }
+        div.className += " pnlm-pointer";
+        span.className += " pnlm-pointer";
+      } else {
+        div.addEventListener(
+          "mousedown",
+          function (e) {
+            onDocumentMouseDown(e);
+          },
+          false
+        );
+        div.addEventListener(
+          "mousemove",
+          function (e) {
+            onDocumentMouseMove(e);
+          },
+          false
+        );
         div.addEventListener(
           "click",
           function (e) {
-            hs.clickHandlerFunc(e, hs.clickHandlerArgs);
+            onDocumentMouseUp(e);
           },
-          "false"
+          false
         );
-        div.className += " pnlm-pointer";
-        span.className += " pnlm-pointer";
+        if (
+          document.documentElement.style.pointerAction === "" &&
+          document.documentElement.style.touchAction === ""
+        ) {
+          div.addEventListener(
+            "pointerdown",
+            function (e) {
+              onDocumentPointerDown(e);
+            },
+            false
+          );
+          div.addEventListener(
+            "pointermove",
+            function (e) {
+              onDocumentPointerMove(e);
+            },
+            false
+          );
+          div.addEventListener(
+            "pointerup",
+            function (e) {
+              onDocumentPointerUp(e);
+            },
+            false
+          );
+        } else {
+          div.addEventListener(
+            "touchstart",
+            function (e) {
+              onDocumentTouchStart(e);
+            },
+            false
+          );
+          div.addEventListener(
+            "touchmove",
+            function (e) {
+              onDocumentTouchMove(e);
+            },
+            false
+          );
+        }
       }
+      if (hs.draggable) {
+        // Handle mouse by container event listeners
+        div.addEventListener("mousedown", function (e) {
+          if (hs.dragHandlerFunc) hs.dragHandlerFunc(e, hs.dragHandlerArgs);
+          draggingHotSpot = hs;
+        });
+
+        if (
+          document.documentElement.style.pointerAction === "" &&
+          document.documentElement.style.touchAction === ""
+        ) {
+          div.addEventListener("pointerdown", function (e) {
+            if (hs.dragHandlerFunc) hs.dragHandlerFunc(e, hs.dragHandlerArgs);
+            draggingHotSpot = hs;
+          });
+        }
+
+        // Handle touch events by hotspot event listener
+        div.addEventListener("touchmove", function (e) {
+          moveHotSpot(hs, e.targetTouches[0]);
+        });
+        div.addEventListener("touchend", function (e) {
+          if (hs.dragHandlerFunc) hs.dragHandlerFunc(e, hs.dragHandlerArgs);
+          draggingHotSpot = null;
+        });
+      }
+
       hs.div = div;
+    }
+
+    /**
+     * Moves a curently displayed hot spot.
+     * @private
+     * @param {Object} hs - Hot spot to move.
+     * @param {MouseEvent} event - Mouse event to get coordinates from.
+     */
+    function moveHotSpot(hs, event) {
+      var coords = mouseEventToCoords(event);
+      hs.pitch = coords[0];
+      hs.yaw = coords[1];
+      renderHotSpot(hs);
+      try {
+        adjust_measurements();
+      } catch (e) {}
     }
 
     /**
@@ -2045,13 +2924,10 @@ export default (function (window, document, undefined) {
         for (var i = 0; i < hs.length; i++) {
           var current = hs[i].div;
           if (current) {
-            while (
-              current.parentNode &&
-              current.parentNode != renderContainer
-            ) {
+            while (current.parentNode && current.parentNode != uiContainer) {
               current = current.parentNode;
             }
-            renderContainer.removeChild(current);
+            uiContainer.removeChild(current);
           }
           delete hs[i].div;
         }
@@ -2071,14 +2947,51 @@ export default (function (window, document, undefined) {
       var z =
         hsPitchSin * configPitchSin + hsPitchCos * yawCos * configPitchCos;
       if (
-        (hs.yaw <= 90 && hs.yaw > -90 && z <= 0) ||
-        ((hs.yaw > 90 || hs.yaw <= -90) && z <= 0)
+        ((hs.yaw <= 90 && hs.yaw > -90 && z <= 0) ||
+          ((hs.yaw > 90 || hs.yaw <= -90) && z <= 0)) &&
+        (hs.object == "poi_embed_helper" || hs.object != "marker_embed_helper")
+      ) {
+        try {
+          var circle_icon = hs.div.children[0];
+          circle_icon.style.visibility = "hidden";
+          hs.div.setAttribute("data-offscreen", 1);
+        } catch (e) {}
+      } else {
+        try {
+          var circle_icon = hs.div.children[0];
+          circle_icon.style.visibility = "visible";
+          hs.div.setAttribute("data-offscreen", 0);
+        } catch (e) {}
+      }
+      if (
+        ((hs.yaw <= 90 && hs.yaw > -90 && z <= 0) ||
+          ((hs.yaw > 90 || hs.yaw <= -90) && z <= 0)) &&
+        hs.object != "poi_embed_helper" &&
+        hs.object != "marker_embed_helper"
       ) {
         hs.div.style.visibility = "hidden";
+        try {
+          $(".tooltip_poi_embed_" + hs.id).css("visibility", "hidden");
+        } catch (e) {}
+        try {
+          $(".tooltip_marker_" + hs.id).css("visibility", "hidden");
+        } catch (e) {}
+        try {
+          $(".tooltip_poi_" + hs.id).css("visibility", "hidden");
+        } catch (e) {}
       } else {
         var yawSin = Math.sin(((-hs.yaw + config.yaw) * Math.PI) / 180),
           hfovTan = Math.tan((config.hfov * Math.PI) / 360);
         hs.div.style.visibility = "visible";
+        try {
+          $(".tooltip_poi_embed_" + hs.id).css("visibility", "visible");
+        } catch (e) {}
+        try {
+          $(".tooltip_marker_" + hs.id).css("visibility", "visible");
+        } catch (e) {}
+        try {
+          $(".tooltip_poi_" + hs.id).css("visibility", "visible");
+        } catch (e) {}
         // Subpixel rendering doesn't work in Firefox
         // https://bugzilla.mozilla.org/show_bug.cgi?id=739176
         var canvas = renderer.getCanvas(),
@@ -2107,15 +3020,241 @@ export default (function (window, document, undefined) {
           coord[0] +
           "px, " +
           coord[1] +
-          "px) translateZ(9999px) rotate(" +
-          config.roll +
-          "deg)";
-        if (hs.scale) {
-          transform += " scale(" + origHfov / config.hfov / z + ")";
+          "px) translateZ(9999px)";
+
+        var rotateZ = 0;
+        var hs_scale = 1;
+        if (hs.type != "nadir") {
+          if (hs.rotateZ != 0) {
+            var c_yaw = config.yaw;
+            c_yaw -= Math.floor(c_yaw / 360 + 0.5) * 360;
+            var angle_pitch = (hs.pitch / 90) * 1.5;
+            if (angle_pitch < 0) angle_pitch = angle_pitch * -1;
+            var diff_yaw = -hs.yaw + c_yaw;
+            diff_yaw -= Math.floor(diff_yaw / 360 + 0.5) * 360;
+            var angle_yaw = -(diff_yaw * angle_pitch);
+            rotateZ = parseInt(hs.rotateZ) + angle_yaw;
+          }
+          var width =
+            window.innerWidth ||
+            document.documentElement.clientWidth ||
+            document.body.clientWidth;
+          if (width < 540 || window.vr_enabled) {
+            if (hs.scale) {
+              hs_scale = hs.size_scale * 0.3;
+            } else {
+              hs_scale = hs.size_scale * 0.6;
+            }
+          } else {
+            hs_scale = hs.size_scale;
+          }
+          if (hs.scale) {
+            hs_scale = hs_scale * (origHfov / config.hfov / z);
+          }
+          transform += " scale(" + hs_scale + ")";
+        } else {
+          if (hs.scale) {
+            transform += " scale(" + origHfov / config.hfov / z + ")";
+          }
         }
-        hs.div.style.webkitTransform = transform;
-        hs.div.style.MozTransform = transform;
-        hs.div.style.transform = transform;
+        transform +=
+          " perspective(500px) rotate(" +
+          config.roll +
+          "deg) rotateX(" +
+          hs.rotateX +
+          "deg) rotateZ(" +
+          rotateZ +
+          "deg)";
+
+        try {
+          if (window.vr_enabled) hs.transform3d = false;
+        } catch (e) {}
+
+        if (hs.transform3d == false) {
+          hs.div.style.webkitTransform = transform;
+          hs.div.style.MozTransform = transform;
+          hs.div.style.transform = transform;
+        }
+
+        if (
+          hs.type != "nadir" &&
+          hs.object != "poi_embed" &&
+          hs.object != "poi_embed_helper" &&
+          hs.object != "marker_embed" &&
+          hs.object != "marker_embed_helper"
+        ) {
+          if (
+            hs.tooltip_visibility == "hover" ||
+            (hs.tooltip_visibility == "visible_mobile" && !window.is_mobile)
+          ) {
+          } else {
+            try {
+              if (
+                hs.type == "marker" &&
+                parseInt(hs.createTooltipArgs.show_room) == 5
+              ) {
+                var hs_height = -40;
+              } else {
+                var hs_height = hs.div.offsetHeight;
+              }
+              var hs_width = hs.div.offsetWidth;
+              var id_tooltip = hs.id;
+              var tooltips = document.getElementsByClassName(
+                "tooltip_" + hs.object + "_" + id_tooltip
+              );
+              for (var index = 0; index < tooltips.length; index++) {
+                var tooltip = tooltips[index];
+                var tooltip_width = tooltip.offsetWidth;
+                var tooltip_height = tooltip.offsetHeight;
+                var x_transform = coord[0] + hs_width / 2 - tooltip_width / 2;
+                var y_transform =
+                  coord[1] -
+                  (hs_height * hs_scale) / 2 -
+                  tooltip_height +
+                  (hs.rotateX / 70) * 15 * hs_scale;
+                var transform_tooltip =
+                  "translate(" +
+                  x_transform +
+                  "px, " +
+                  y_transform +
+                  "px) translateZ(9999px)";
+                tooltip.style.webkitTransform = transform_tooltip;
+                tooltip.style.mozTransform = transform_tooltip;
+                tooltip.style.transform = transform_tooltip;
+              }
+            } catch (e) {}
+          }
+          if (hs.type == "audio") {
+            try {
+              var hs_width = hs.div.offsetWidth;
+              var hs_height = hs.div.offsetHeight;
+              var id_tooltip = hs.id;
+              var tooltips = document.getElementsByClassName(
+                "audio_" + hs.object + "_" + id_tooltip
+              );
+              for (var index = 0; index < tooltips.length; index++) {
+                var tooltip = tooltips[index];
+                var tooltip_width = tooltip.offsetWidth;
+                var tooltip_height = tooltip.offsetHeight;
+                var x_transform = coord[0] + hs_width / 2 - tooltip_width / 2;
+                var y_transform =
+                  coord[1] -
+                  (hs_height * hs_scale) / 2 -
+                  tooltip_height +
+                  (hs.rotateX / 70) * 15 * hs_scale;
+                var transform_tooltip =
+                  "translate(" +
+                  x_transform +
+                  "px, " +
+                  y_transform +
+                  "px) translateZ(9999px)";
+                tooltip.style.webkitTransform = transform_tooltip;
+                tooltip.style.mozTransform = transform_tooltip;
+                tooltip.style.transform = transform_tooltip;
+              }
+            } catch (e) {}
+          }
+        }
+
+        if (hs.view_type > 0) {
+          try {
+            if (hs.object == "poi_embed" || hs.object == "marker_embed") {
+              var hs_width = $(".hotspot_" + hs.id)[0].getBoundingClientRect()
+                .width;
+              var hs_height = $(".hotspot_" + hs.id)[0].getBoundingClientRect()
+                .height;
+              hs_scale = 1;
+            } else {
+              var hs_width = hs.div.offsetWidth;
+              var hs_height = hs.div.offsetHeight;
+            }
+            var id_poi = hs.id;
+            var boxs = document.getElementsByClassName("box_poi_" + id_poi);
+            for (var index = 0; index < boxs.length; index++) {
+              var box = boxs[index];
+              var box_width = box.offsetWidth;
+              var box_height = box.offsetHeight;
+              if (hs.object == "poi_embed" || hs.object == "marker_embed") {
+                var top_1 = $("#poi_embded_helper_" + hs.id + "_1").position()
+                  .top;
+                var left_1 = $("#poi_embded_helper_" + hs.id + "_1").position()
+                  .left;
+                var top_2 = $("#poi_embded_helper_" + hs.id + "_2").position()
+                  .top;
+                var left_2 = $("#poi_embded_helper_" + hs.id + "_2").position()
+                  .left;
+                var top_3 = $("#poi_embded_helper_" + hs.id + "_3").position()
+                  .top;
+                var left_3 = $("#poi_embded_helper_" + hs.id + "_3").position()
+                  .left;
+                var top = top_1;
+                var left = left_1;
+                var hs_width = left_3 - left;
+                var hs_height = top_2 - top;
+              } else {
+                var top = $(".hotspot_" + hs.id).position().top;
+                var left = $(".hotspot_" + hs.id).position().left;
+              }
+              switch ($(".box_poi_" + hs.id).attr("data-box-pos")) {
+                case "right":
+                  top =
+                    top +
+                    5 +
+                    (hs_height / 2) * hs_scale -
+                    (hs.rotateX / 70) * hs_scale * 13;
+                  left = left + (hs_width + 20 / hs_scale) * hs_scale;
+                  $(".box_poi_" + hs.id + " .box-arrow-border").css({
+                    top: "calc(50% - 5px)",
+                    left: "-14px",
+                    transform: "rotate(-90deg)",
+                  });
+                  break;
+                case "left":
+                  top =
+                    top +
+                    0 +
+                    (hs_height / 2) * hs_scale -
+                    (hs.rotateX / 70) * hs_scale * 13;
+                  left = left - 25 - box_width;
+                  $(".box_poi_" + hs.id + " .box-arrow-border").css({
+                    top: "calc(50% - 5px)",
+                    left: box_width - 6 + "px",
+                    transform: "rotate(90deg)",
+                  });
+                  break;
+                case "bottom":
+                  top =
+                    top +
+                    25 +
+                    hs_height * hs_scale -
+                    (hs.rotateX / 70) * hs_scale * 30 +
+                    box_height / 2;
+                  left = left + (hs_width / 2) * hs_scale - box_width / 2;
+                  $(".box_poi_" + hs.id + " .box-arrow-border").css({
+                    top: "-9px",
+                    left: "calc(50% - 10px)",
+                    transform: "rotate(0deg)",
+                  });
+                  break;
+                case "top":
+                  top = top - box_height / 2 - 25;
+                  left = left + (hs_width / 2) * hs_scale - box_width / 2;
+                  $(".box_poi_" + hs.id + " .box-arrow-border").css({
+                    top: box_height - 1 + "px",
+                    left: "calc(50% - 10px)",
+                    transform: "rotate(180deg)",
+                  });
+                  break;
+              }
+              $(".box_poi_" + hs.id).css("top", top + "px");
+              $(".box_poi_" + hs.id).css("left", left + "px");
+              box.style.webkitTransform =
+                "translateY(-50%) translateZ(99991px)";
+              box.style.mozTransform = "translateY(-50%) translateZ(99991px)";
+              box.style.transform = "translateY(-50%) translateZ(99991px)";
+            }
+          } catch (e) {}
+        }
       }
     }
 
@@ -2155,10 +3294,12 @@ export default (function (window, document, undefined) {
       // Merge default scene config
       for (k in initialConfig.default) {
         if (initialConfig.default.hasOwnProperty(k)) {
-          if (k === "uiText") {
-            for (s in initialConfig.default.uiText) {
-              if (initialConfig.default.uiText.hasOwnProperty(s)) {
-                config.uiText[s] = escapeHTML(initialConfig.default.uiText[s]);
+          if (k == "strings") {
+            for (s in initialConfig.default.strings) {
+              if (initialConfig.default.strings.hasOwnProperty(s)) {
+                config.strings[s] = escapeHTML(
+                  initialConfig.default.strings[s]
+                );
               }
             }
           } else {
@@ -2180,10 +3321,10 @@ export default (function (window, document, undefined) {
         var scene = initialConfig.scenes[sceneId];
         for (k in scene) {
           if (scene.hasOwnProperty(k)) {
-            if (k === "uiText") {
-              for (s in scene.uiText) {
-                if (scene.uiText.hasOwnProperty(s)) {
-                  config.uiText[s] = escapeHTML(scene.uiText[s]);
+            if (k == "strings") {
+              for (s in scene.strings) {
+                if (scene.strings.hasOwnProperty(s)) {
+                  config.strings[s] = escapeHTML(scene.strings[s]);
                 }
               }
             } else {
@@ -2200,10 +3341,10 @@ export default (function (window, document, undefined) {
       // Merge initial config
       for (k in initialConfig) {
         if (initialConfig.hasOwnProperty(k)) {
-          if (k === "uiText") {
-            for (s in initialConfig.uiText) {
-              if (initialConfig.uiText.hasOwnProperty(s)) {
-                config.uiText[s] = escapeHTML(initialConfig.uiText[s]);
+          if (k == "strings") {
+            for (s in initialConfig.strings) {
+              if (initialConfig.strings.hasOwnProperty(s)) {
+                config.strings[s] = escapeHTML(initialConfig.strings[s]);
               }
             }
           } else {
@@ -2238,31 +3379,26 @@ export default (function (window, document, undefined) {
 
       // Handle different preview values
       var title = config.title,
-        author = config.author,
-        description = config.description;
-
+        author = config.author;
       if (isPreview) {
         if ("previewTitle" in config) config.title = config.previewTitle;
-        if ("previewDescription" in config)
-          config.description = config.previewDescription;
         if ("previewAuthor" in config) config.author = config.previewAuthor;
       }
 
       // Reset title / author display
       if (!config.hasOwnProperty("title")) infoDisplay.title.innerHTML = "";
-      if (!config.hasOwnProperty("description"))
-        infoDisplay.description.innerHTML = "";
       if (!config.hasOwnProperty("author")) infoDisplay.author.innerHTML = "";
-      if (
-        !config.hasOwnProperty("title") &&
-        !config.hasOwnProperty("description") &&
-        !config.hasOwnProperty("author")
-      )
+      if (!config.hasOwnProperty("title") && !config.hasOwnProperty("author"))
         infoDisplay.container.style.display = "none";
+      if (config.targetBlank) {
+        aboutMsgLink.rel = "noopener";
+        aboutMsgLink.target = "_blank";
+      }
 
       // Fill in load button label and loading box text
-      controls.load.innerHTML = "<p>" + config.uiText.loadButtonLabel + "</p>";
-      infoDisplay.load.boxp.innerHTML = config.uiText.loadingLabel;
+      controls.load.innerHTML =
+        "<div><p>" + config.strings.loadButtonLabel + "</p></div>";
+      infoDisplay.load.boxp.innerHTML = config.strings.loadingLabel;
 
       // Process other options
       for (var key in config) {
@@ -2272,38 +3408,24 @@ export default (function (window, document, undefined) {
               infoDisplay.title.innerHTML = escapeHTML(config[key]);
               infoDisplay.container.style.display = "inline";
               break;
-            case "description":
-              infoDisplay.description.innerHTML = escapeHTML(config[key]);
-              infoDisplay.container.style.display = "inline";
-              break;
+
             case "author":
               var authorText = escapeHTML(config[key]);
               if (config.authorURL) {
                 var authorLink = document.createElement("a");
-                authorLink.href = sanitizeURL(config["authorURL"]);
-                authorLink.target = "_blank";
+                authorLink.href = sanitizeURL(config["authorURL"], true);
+                if (config.targetBlank) {
+                  authorLink.target = "_blank";
+                  authorLink.rel = "noopener";
+                }
                 authorLink.innerHTML = escapeHTML(config[key]);
                 authorText = authorLink.outerHTML;
               }
-              infoDisplay.author.innerHTML = config.uiText.bylineLabel.replace(
+              infoDisplay.author.innerHTML = config.strings.bylineLabel.replace(
                 "%s",
                 authorText
               );
               infoDisplay.container.style.display = "inline";
-              break;
-
-            case "fallback":
-              var link = document.createElement("a");
-              link.href = sanitizeURL(config[key]);
-              link.target = "_blank";
-              link.textContent =
-                "Click here to view this panorama in an alternative viewer.";
-              var message = document.createElement("p");
-              message.textContent = "Your browser does not support WebGL.";
-              message.appendChild(document.createElement("br"));
-              message.appendChild(link);
-              infoDisplay.errorMsg.innerHTML = ""; // Removes all children nodes
-              infoDisplay.errorMsg.appendChild(message);
               break;
 
             case "hfov":
@@ -2362,10 +3484,8 @@ export default (function (window, document, undefined) {
               break;
 
             case "orientationOnByDefault":
-              if (config[key]) {
-                startOrientation();
-                break;
-              }
+              if (config[key]) startOrientation();
+              break;
           }
         }
       }
@@ -2374,8 +3494,6 @@ export default (function (window, document, undefined) {
         // Restore original values if changed for preview
         if (title) config.title = title;
         else delete config.title;
-        if (description) config.description = description;
-        else delete config.description;
         if (author) config.author = author;
         else delete config.author;
       }
@@ -2386,17 +3504,18 @@ export default (function (window, document, undefined) {
      * @private
      */
     function toggleFullscreen() {
+      var elem_body = document.getElementsByTagName("html")[0];
       if (loaded && !error) {
         if (!fullscreenActive) {
           try {
-            if (container.requestFullscreen) {
-              container.requestFullscreen();
-            } else if (container.mozRequestFullScreen) {
-              container.mozRequestFullScreen();
-            } else if (container.msRequestFullscreen) {
-              container.msRequestFullscreen();
+            if (elem_body.requestFullscreen) {
+              elem_body.requestFullscreen();
+            } else if (elem_body.mozRequestFullScreen) {
+              elem_body.mozRequestFullScreen();
+            } else if (elem_body.msRequestFullscreen) {
+              elem_body.msRequestFullscreen();
             } else {
-              container.webkitRequestFullScreen();
+              elem_body.webkitRequestFullScreen();
             }
           } catch (event) {
             // Fullscreen doesn't work
@@ -2450,7 +3569,7 @@ export default (function (window, document, undefined) {
      */
     function zoomIn() {
       if (loaded) {
-        setHfov(config.hfov - 5);
+        setHfov(config.hfov - 1);
         animateInit();
       }
     }
@@ -2461,13 +3580,13 @@ export default (function (window, document, undefined) {
      */
     function zoomOut() {
       if (loaded) {
-        setHfov(config.hfov + 5);
+        setHfov(config.hfov + 1);
         animateInit();
       }
     }
 
     /**
-     * Clamps horzontal field of view to viewer's limits.
+     * Clamps horizontal field of view to viewer's limits.
      * @private
      * @param {number} hfov - Input horizontal field of view (in degrees)
      * @return {number} - Clamped horizontal field of view (in degrees)
@@ -2475,7 +3594,7 @@ export default (function (window, document, undefined) {
     function constrainHfov(hfov) {
       // Keep field of view within bounds
       var minHfov = config.minHfov;
-      if (config.type === "multires" && renderer && !config.multiResMinHfov) {
+      if (config.type == "multires" && renderer && !config.multiResMinHfov) {
         minHfov = Math.min(
           minHfov,
           renderer.getCanvas().width /
@@ -2496,7 +3615,11 @@ export default (function (window, document, undefined) {
         newHfov = hfov;
       }
       // Optionally avoid showing background (empty space) on top or bottom by adapting newHfov
-      if (config.avoidShowingBackground && renderer) {
+      if (
+        config.avoidShowingBackground &&
+        renderer &&
+        !isNaN(config.maxPitch - config.minPitch)
+      ) {
         var canvas = renderer.getCanvas();
         newHfov = Math.min(
           newHfov,
@@ -2530,6 +3653,7 @@ export default (function (window, document, undefined) {
       animatedMove = {};
       autoRotateSpeed = config.autoRotate ? config.autoRotate : autoRotateSpeed;
       config.autoRotate = false;
+      config.is_autorotating = false;
     }
 
     /**
@@ -2543,6 +3667,7 @@ export default (function (window, document, undefined) {
       clearError();
       loaded = false;
 
+      //clearInteractionMessage();
       controls.load.style.display = "none";
       infoDisplay.load.box.style.display = "inline";
       init();
@@ -2569,19 +3694,29 @@ export default (function (window, document, undefined) {
           (config.pitch * Math.PI) / 180,
           (config.yaw * Math.PI) / 180,
           (config.hfov * Math.PI) / 180,
-          { returnImage: true }
+          { returnImage: "ImageBitmap" }
         );
         if (data !== undefined) {
-          fadeImg = new Image();
+          if (data.then) fadeImg = document.createElement("canvas");
+          else fadeImg = new Image(); // ImageBitmap isn't supported
           fadeImg.className = "pnlm-fade-img";
           fadeImg.style.transition =
             "opacity " + config.sceneFadeDuration / 1000 + "s";
           fadeImg.style.width = "100%";
           fadeImg.style.height = "100%";
-          fadeImg.onload = function () {
-            loadScene(sceneId, targetPitch, targetYaw, targetHfov, true);
-          };
-          fadeImg.src = data;
+          if (data.then) {
+            data.then(function (img) {
+              fadeImg.width = img.width;
+              fadeImg.height = img.height;
+              fadeImg.getContext("2d").drawImage(img, 0, 0);
+              loadScene(sceneId, targetPitch, targetYaw, targetHfov, true);
+            });
+          } else {
+            fadeImg.onload = function () {
+              loadScene(sceneId, targetPitch, targetYaw, targetHfov, true);
+            };
+            fadeImg.src = data;
+          }
           renderContainer.appendChild(fadeImg);
           renderer.fadeImg = fadeImg;
           return;
@@ -2649,24 +3784,25 @@ export default (function (window, document, undefined) {
      * @private
      */
     function startOrientation() {
-      orientation = 1;
-      // Fix for IOS 13 where the user needs to perform an action i.e click. Then we need to ask permission
+      if (!orientationSupport) return;
       if (
-        DeviceOrientationEvent &&
-        typeof DeviceOrientationEvent.requestPermission === "function"
+        typeof DeviceMotionEvent !== "undefined" &&
+        typeof DeviceMotionEvent.requestPermission === "function"
       ) {
-        DeviceOrientationEvent.requestPermission()
-          .then((response) => {
-            if (response === "granted") {
-              window.addEventListener("deviceorientation", orientationListener);
-            }
-          })
-          .catch(console.error);
+        DeviceOrientationEvent.requestPermission().then(function (response) {
+          if (response == "granted") {
+            orientation = 1;
+            window.addEventListener("deviceorientation", orientationListener);
+            controls.orientation.classList.add(
+              "pnlm-orientation-button-active"
+            );
+          }
+        });
       } else {
+        orientation = 1;
         window.addEventListener("deviceorientation", orientationListener);
+        controls.orientation.classList.add("pnlm-orientation-button-active");
       }
-      // window.addEventListener('deviceorientation', orientationListener);
-      controls.orientation.classList.add("pnlm-orientation-button-active");
     }
 
     /**
@@ -2699,17 +3835,58 @@ export default (function (window, document, undefined) {
      * The URL cannot be of protocol 'javascript'.
      * @private
      * @param {string} url - URL to sanitize
+     * @param {boolean} href - True if URL is for link (blocks data URIs)
      * @returns {string} Sanitized URL
      */
-    function sanitizeURL(url) {
-      if (url.trim().toLowerCase().indexOf("javascript:") === 0) {
+    function sanitizeURL(url, href) {
+      try {
+        var decoded_url = decodeURIComponent(unescape(url))
+          .replace(/[^\w:]/g, "")
+          .toLowerCase();
+      } catch (e) {
+        return "about:blank";
+      }
+      if (
+        decoded_url.indexOf("javascript:") === 0 ||
+        decoded_url.indexOf("vbscript:") === 0
+      ) {
+        console.log("Script URL removed.");
+        return "about:blank";
+      }
+      if (href && decoded_url.indexOf("data:") === 0) {
+        console.log("Data URI removed from link.");
         return "about:blank";
       }
       return url;
     }
 
     /**
-     * Removes possibility of XSS atacks with URLs for CSS.
+     * Unescapes HTML entities.
+     * Copied from Marked.js 0.7.0.
+     * @private
+     * @param {string} url - URL to sanitize
+     * @param {boolean} href - True if URL is for link (blocks data URIs)
+     * @returns {string} Sanitized URL
+     */
+    function unescape(html) {
+      // Explicitly match decimal, hex, and named HTML entities
+      return html.replace(
+        /&(#(?:\d+)|(?:#x[0-9A-Fa-f]+)|(?:\w+));?/gi,
+        function (_, n) {
+          n = n.toLowerCase();
+          if (n === "colon") return ":";
+          if (n.charAt(0) === "#") {
+            return n.charAt(1) === "x"
+              ? String.fromCharCode(parseInt(n.substring(2), 16))
+              : String.fromCharCode(+n.substring(1));
+          }
+          return "";
+        }
+      );
+    }
+
+    /**
+     * Removes possibility of XSS attacks with URLs for CSS.
      * The URL will be sanitized with `sanitizeURL()` and single quotes
      * and double quotes escaped.
      * @private
@@ -2753,10 +3930,10 @@ export default (function (window, document, undefined) {
     this.setPitch = function (pitch, animated, callback, callbackArgs) {
       latestInteraction = Date.now();
       if (Math.abs(pitch - config.pitch) <= eps) {
-        if (typeof callback === "function") callback(callbackArgs);
+        if (typeof callback == "function") callback(callbackArgs);
         return this;
       }
-      animated = animated === undefined ? 1000 : Number(animated);
+      animated = animated == undefined ? 1000 : Number(animated);
       if (animated) {
         animatedMove.pitch = {
           startTime: Date.now(),
@@ -2764,7 +3941,7 @@ export default (function (window, document, undefined) {
           endPosition: pitch,
           duration: animated,
         };
-        if (typeof callback === "function")
+        if (typeof callback == "function")
           setTimeout(function () {
             callback(callbackArgs);
           }, animated);
@@ -2785,6 +3962,26 @@ export default (function (window, document, undefined) {
       return [config.minPitch, config.maxPitch];
     };
 
+    this.setFriction = function (friction) {
+      config.friction = friction;
+      return this;
+    };
+
+    this.setZoomFriction = function (friction) {
+      config.zoom_friction = friction;
+      return this;
+    };
+
+    this.setTouchPanSpeedCoeffFactor = function (factor) {
+      config.touchPanSpeedCoeffFactor = factor;
+      return this;
+    };
+
+    this.setAutoRotateInactivityDelay = function (delay) {
+      config.autoRotateInactivityDelay = delay;
+      return this;
+    };
+
     /**
      * Set the minimum and maximum allowed pitches (in degrees).
      * @memberof Viewer
@@ -2793,8 +3990,8 @@ export default (function (window, document, undefined) {
      * @returns {Viewer} `this`
      */
     this.setPitchBounds = function (bounds) {
-      config.minPitch = Math.max(-90, Math.min(bounds[0], 90));
-      config.maxPitch = Math.max(-90, Math.min(bounds[1], 90));
+      config.minPitch = Math.max(-125, Math.min(bounds[0], 125));
+      config.maxPitch = Math.max(-125, Math.min(bounds[1], 125));
       return this;
     };
 
@@ -2805,7 +4002,15 @@ export default (function (window, document, undefined) {
      * @returns {number} Yaw in degrees
      */
     this.getYaw = function () {
-      return config.yaw;
+      return ((config.yaw + 540) % 360) - 180;
+    };
+
+    this.is_autorotating = function () {
+      return config.is_autorotating;
+    };
+
+    this.set_is_autorotating = function (a) {
+      config.is_autorotating = a;
     };
 
     /**
@@ -2821,10 +4026,10 @@ export default (function (window, document, undefined) {
     this.setYaw = function (yaw, animated, callback, callbackArgs) {
       latestInteraction = Date.now();
       if (Math.abs(yaw - config.yaw) <= eps) {
-        if (typeof callback === "function") callback(callbackArgs);
+        if (typeof callback == "function") callback(callbackArgs);
         return this;
       }
-      animated = animated === undefined ? 1000 : Number(animated);
+      animated = animated == undefined ? 1000 : Number(animated);
       yaw = ((yaw + 180) % 360) - 180; // Keep in bounds
       if (animated) {
         // Animate in shortest direction
@@ -2837,7 +4042,7 @@ export default (function (window, document, undefined) {
           endPosition: yaw,
           duration: animated,
         };
-        if (typeof callback === "function")
+        if (typeof callback == "function")
           setTimeout(function () {
             callback(callbackArgs);
           }, animated);
@@ -2859,15 +4064,15 @@ export default (function (window, document, undefined) {
     };
 
     /**
-     * Set the minimum and maximum allowed yaws (in degrees [-180, 180]).
+     * Set the minimum and maximum allowed yaws (in degrees [-360, 360]).
      * @memberof Viewer
      * @instance
      * @param {number[]} bounds - [minimum yaw, maximum yaw]
      * @returns {Viewer} `this`
      */
     this.setYawBounds = function (bounds) {
-      config.minYaw = Math.max(-180, Math.min(bounds[0], 180));
-      config.maxYaw = Math.max(-180, Math.min(bounds[1], 180));
+      config.minYaw = Math.max(-360, Math.min(bounds[0], 360));
+      config.maxYaw = Math.max(-360, Math.min(bounds[1], 360));
       return this;
     };
 
@@ -2894,10 +4099,10 @@ export default (function (window, document, undefined) {
     this.setHfov = function (hfov, animated, callback, callbackArgs) {
       latestInteraction = Date.now();
       if (Math.abs(hfov - config.hfov) <= eps) {
-        if (typeof callback === "function") callback(callbackArgs);
+        if (typeof callback == "function") callback(callbackArgs);
         return this;
       }
-      animated = animated === undefined ? 1000 : Number(animated);
+      animated = animated == undefined ? 1000 : Number(animated);
       if (animated) {
         animatedMove.hfov = {
           startTime: Date.now(),
@@ -2905,7 +4110,7 @@ export default (function (window, document, undefined) {
           endPosition: constrainHfov(hfov),
           duration: animated,
         };
-        if (typeof callback === "function")
+        if (typeof callback == "function")
           setTimeout(function () {
             callback(callbackArgs);
           }, animated);
@@ -2921,7 +4126,7 @@ export default (function (window, document, undefined) {
      * (in degrees).
      * @memberof Viewer
      * @instance
-     * @returns {number[]} [minimum hfov, maximum hfov]
+     * @returns {number[]} [minimum HFOV, maximum HFOV]
      */
     this.getHfovBounds = function () {
       return [config.minHfov, config.maxHfov];
@@ -2931,7 +4136,7 @@ export default (function (window, document, undefined) {
      * Set the minimum and maximum allowed horizontal fields of view (in degrees).
      * @memberof Viewer
      * @instance
-     * @param {number[]} bounds - [minimum hfov, maximum hfov]
+     * @param {number[]} bounds - [minimum HFOV, maximum HFOV]
      * @returns {Viewer} `this`
      */
     this.setHfovBounds = function (bounds) {
@@ -2946,7 +4151,7 @@ export default (function (window, document, undefined) {
      * @instance
      * @param {number} [pitch] - Target pitch
      * @param {number} [yaw] - Target yaw
-     * @param {number} [hfov] - Target hfov
+     * @param {number} [hfov] - Target HFOV
      * @param {boolean|number} [animated=1000] - Animation duration in milliseconds or false for no animation
      * @param {function} [callback] - Function to call when animation finishes
      * @param {object} [callbackArgs] - Arguments to pass to callback function
@@ -2960,7 +4165,7 @@ export default (function (window, document, undefined) {
       callback,
       callbackArgs
     ) {
-      animated = animated === undefined ? 1000 : Number(animated);
+      animated = animated == undefined ? 1000 : Number(animated);
       if (pitch !== undefined && Math.abs(pitch - config.pitch) > eps) {
         this.setPitch(pitch, animated, callback, callbackArgs);
         callback = undefined;
@@ -2973,7 +4178,7 @@ export default (function (window, document, undefined) {
         this.setHfov(hfov, animated, callback, callbackArgs);
         callback = undefined;
       }
-      if (typeof callback === "function") callback(callbackArgs);
+      if (typeof callback == "function") callback(callbackArgs);
       return this;
     };
 
@@ -3061,14 +4266,23 @@ export default (function (window, document, undefined) {
      * @memberof Viewer
      * @instance
      * @param {number} [speed] - Auto rotation speed / direction. If not specified, previous value is used.
-     * @param {number} [pitch] - The pitch to rotate at. If not specified, inital pitch is used.
+     * @param {number} [pitch] - The pitch to rotate at. If not specified, initial pitch is used.
+     * @param {number} [hfov] - The HFOV to rotate at. If not specified, initial HFOV is used.
+     * @param {number} [inactivityDelay] - The delay, in milliseconds, after which
+     *      to automatically restart auto rotation if it is interupted by the user.
+     *      If not specified, auto rotation will not automatically restart after it
+     *      is stopped.
      * @returns {Viewer} `this`
      */
-    this.startAutoRotate = function (speed, pitch) {
+    this.startAutoRotate = function (speed, pitch, hfov, inactivityDelay) {
+      config.is_autorotating = true;
       speed = speed || autoRotateSpeed || 1;
       pitch = pitch === undefined ? origPitch : pitch;
+      hfov = hfov === undefined ? origHfov : hfov;
       config.autoRotate = speed;
-      _this.lookAt(pitch, undefined, origHfov, 3000);
+      if (inactivityDelay !== undefined)
+        config.autoRotateInactivityDelay = inactivityDelay;
+      _this.lookAt(pitch, undefined, hfov, 3000);
       animateInit();
       return this;
     };
@@ -3080,6 +4294,9 @@ export default (function (window, document, undefined) {
      * @returns {Viewer} `this`
      */
     this.stopAutoRotate = function () {
+      window.viewer_mov_follow_mouse = false;
+      window.viewer_mov_pos_change = false;
+      config.is_autorotating = false;
       autoRotateSpeed = config.autoRotate ? config.autoRotate : autoRotateSpeed;
       config.autoRotate = false;
       config.autoRotateInactivityDelay = -1;
@@ -3157,25 +4374,11 @@ export default (function (window, document, undefined) {
     };
 
     /**
-     * Get ID of all scenes.
-     * @memberof Viewer
-     * @instance
-     * @returns [Object] ID of all scenes
-     */
-    this.getAllScenes = function () {
-      const allScenes = [];
-      Object.keys(initialConfig.scenes).forEach((scene) => {
-        allScenes.push({ [scene]: initialConfig.scenes[scene] });
-      });
-      return allScenes;
-    };
-
-    /**
      * Add a new scene.
      * @memberof Viewer
      * @instance
      * @param {string} sceneId - The ID of the new scene
-     * @param {string} config - The configuration of the new scene
+     * @param {Object} config - The configuration of the new scene
      * @returns {Viewer} `this`
      */
     this.addScene = function (sceneId, config) {
@@ -3192,7 +4395,7 @@ export default (function (window, document, undefined) {
      */
     this.removeScene = function (sceneId) {
       if (
-        config.scene === sceneId ||
+        config.scene == sceneId ||
         !initialConfig.scenes.hasOwnProperty(sceneId)
       )
         return false;
@@ -3250,7 +4453,7 @@ export default (function (window, document, undefined) {
         if (initialConfig.scenes.hasOwnProperty(id)) {
           if (!initialConfig.scenes[id].hasOwnProperty("hotSpots")) {
             initialConfig.scenes[id].hotSpots = []; // Create hot spots array if needed
-            if (id === config.scene)
+            if (id == config.scene)
               config.hotSpots = initialConfig.scenes[id].hotSpots; // Link to current config
           }
           initialConfig.scenes[id].hotSpots.push(hs); // Add hot spot to config
@@ -3258,7 +4461,7 @@ export default (function (window, document, undefined) {
           throw "Invalid scene ID!";
         }
       }
-      if (sceneId === undefined || config.scene === sceneId) {
+      if (sceneId === undefined || config.scene == sceneId) {
         // Add to current scene
         createHotSpot(hs);
         if (loaded) renderHotSpot(hs);
@@ -3275,18 +4478,18 @@ export default (function (window, document, undefined) {
      * @returns {boolean} True if deletion is successful, else false
      */
     this.removeHotSpot = function (hotSpotId, sceneId) {
-      if (sceneId === undefined || config.scene === sceneId) {
+      if (sceneId === undefined || config.scene == sceneId) {
         if (!config.hotSpots) return false;
         for (var i = 0; i < config.hotSpots.length; i++) {
           if (
             config.hotSpots[i].hasOwnProperty("id") &&
-            config.hotSpots[i].id === hotSpotId
+            config.hotSpots[i].id == hotSpotId
           ) {
             // Delete hot spot DOM elements
             var current = config.hotSpots[i].div;
-            while (current.parentNode != renderContainer)
+            while (current.parentNode != uiContainer)
               current = current.parentNode;
-            renderContainer.removeChild(current);
+            uiContainer.removeChild(current);
             delete config.hotSpots[i].div;
             // Remove hot spot from configuration
             config.hotSpots.splice(i, 1);
@@ -3304,7 +4507,7 @@ export default (function (window, document, undefined) {
           ) {
             if (
               initialConfig.scenes[sceneId].hotSpots[j].hasOwnProperty("id") &&
-              initialConfig.scenes[sceneId].hotSpots[j].id === hotSpotId
+              initialConfig.scenes[sceneId].hotSpots[j].id == hotSpotId
             ) {
               // Remove hot spot from configuration
               initialConfig.scenes[sceneId].hotSpots.splice(j, 1);
@@ -3317,6 +4520,20 @@ export default (function (window, document, undefined) {
       }
     };
 
+    this.modifyHotSpot = function (hotSpotId, yaw, pitch) {
+      if (!config.hotSpots) return false;
+      for (var i = 0; i < config.hotSpots.length; i++) {
+        if (
+          config.hotSpots[i].hasOwnProperty("id") &&
+          config.hotSpots[i].id === hotSpotId
+        ) {
+          config.hotSpots[i].yaw = yaw;
+          config.hotSpots[i].pitch = pitch;
+          return true;
+        }
+      }
+    };
+
     /**
      * This method should be called if the viewer's container is resized.
      * @memberof Viewer
@@ -3324,16 +4541,6 @@ export default (function (window, document, undefined) {
      */
     this.resize = function () {
       if (renderer) onDocumentResize();
-    };
-
-    /**
-     * Check if a panorama is loaded.
-     * @memberof Viewer
-     * @instance
-     * @returns {boolean} True if a panorama is loaded, else false
-     */
-    this.isLoaded = function () {
-      return loaded;
     };
 
     /**
@@ -3361,7 +4568,7 @@ export default (function (window, document, undefined) {
      * @instance
      */
     this.startOrientation = function () {
-      if (orientationSupport) startOrientation();
+      startOrientation();
     };
 
     /**
@@ -3407,7 +4614,7 @@ export default (function (window, document, undefined) {
           // Remove listener if found
           externalEventListeners[type].splice(i, 1);
         }
-        if (externalEventListeners[type].length === 0) {
+        if (externalEventListeners[type].length == 0) {
           // Remove category if empty
           delete externalEventListeners[type];
         }
@@ -3443,6 +4650,10 @@ export default (function (window, document, undefined) {
       destroyed = true;
       clearTimeout(autoRotateStart);
 
+      if (xhr) xhr.abort();
+      if (Array.isArray(panoImage)) {
+        for (var i = 0; i < 6; i++) panoImage[i].src = "";
+      }
       if (renderer) renderer.destroy();
       if (listenersAdded) {
         document.removeEventListener("mousemove", onDocumentMouseMove, false);
@@ -3467,12 +4678,16 @@ export default (function (window, document, undefined) {
           onFullScreenChange,
           false
         );
-        window.removeEventListener("resize", onDocumentResize, false);
-        window.removeEventListener(
-          "orientationchange",
-          onDocumentResize,
-          false
-        );
+        if (resizeObserver) {
+          resizeObserver.disconnect();
+        } else {
+          window.removeEventListener("resize", onDocumentResize, false);
+          window.removeEventListener(
+            "orientationchange",
+            onDocumentResize,
+            false
+          );
+        }
         container.removeEventListener("keydown", onDocumentKeyPress, false);
         container.removeEventListener("keyup", onDocumentKeyUp, false);
         container.removeEventListener("blur", clearKeys, false);
@@ -3488,7 +4703,4 @@ export default (function (window, document, undefined) {
       return new Viewer(container, config);
     },
   };
-})(
-  typeof window === "undefined" ? null : window,
-  typeof document === "undefined" ? null : document
-);
+})(window, document);

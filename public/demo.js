@@ -1,13 +1,15 @@
 viewer = pannellum.viewer("panorama", {
   type: "equirectangular",
-  panorama: "/images/bma-1.jpg",
+  panorama: "/images/pana_3.jpg",
   hotSpots: [
     {
-      pitch: 14.1,
-      yaw: 1.5,
+      pitch: 12,
+      yaw: -2,
       cssClass: "custom-hotspot",
       createTooltipFunc: createDivShowImage,
       createTooltipArgs: "Div image",
+      scale: true,
+      transform3d: true,
     },
     {
       pitch: -9.4,
@@ -26,6 +28,9 @@ viewer = pannellum.viewer("panorama", {
   ],
 });
 
+viewer.on("mousedown", function (event) {
+  console.log("mousedown", viewer.getPitch(), viewer.getYaw());
+});
 // Hot spot creation function
 function hotspot(hotSpotDiv, args) {
   hotSpotDiv.classList.add("custom-tooltip");
@@ -38,20 +43,29 @@ function hotspot(hotSpotDiv, args) {
   span.style.marginTop = -span.scrollHeight - 12 + "px";
 }
 
-// create div show image
-function createDivShowImage(hotSpotDiv, args) {
-  hotSpotDiv.classList.add("custom-tooltip");
+function createCustomDiv(hotSpotDiv, args) {
+  hotSpotDiv.classList.add("custom-div");
   var div = document.createElement("div");
+  div.style.backgroundColor = "red";
   div.innerHTML = args;
   hotSpotDiv.appendChild(div);
-  div.style.width = 400 + "px";
-  div.style.marginLeft = -(div.scrollWidth - hotSpotDiv.offsetWidth) / 2 + "px";
-  div.style.marginTop = -div.scrollHeight - 12 + "px";
-  div.onclick = function () {
-    alert("Click to div, show image or modal");
-  };
-  div.innerHTML = `<img style="
-    max-width: 100%;
-    max-height: 100%;"
-    src="https://cdn.tgdd.vn/Products/Images/42/307245/Slider/xiaomi-redmi-12-yt-1020x570-3.jpg" alt="image" />`;
+}
+
+// create div show image
+function createDivShowImage(hotSpotDiv, args) {
+  const img = document.createElement("img");
+  img.src = "/images/banner2.jpg";
+  [
+    "pnlm-hotspot-bas",
+    "hotspot-embed",
+    "noselect",
+    "poi_embed",
+    "poi_embed_19016",
+    "hotspot_19016",
+    "poi_not_selectable",
+  ].forEach((item) => {
+    hotSpotDiv.classList.add(item);
+  });
+
+  hotSpotDiv.appendChild(img);
 }

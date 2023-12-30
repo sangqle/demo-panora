@@ -9,8 +9,8 @@ export default function Home() {
 
   return (
     <div className="">
+      <Script type="text/javascript" src="/vendor/libpannellum.js" />
       <Script type="text/javascript" src="/vendor/pannellum.js" />
-
       <Script type="text/javascript" src="demo.js" />
       <div className='flex justify-center items-center'>
         <div className='w-screen h-[800px]'>

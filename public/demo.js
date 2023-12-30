@@ -9,21 +9,6 @@ viewer = pannellum.viewer("panorama", {
       createTooltipFunc: createDivShowImage,
       createTooltipArgs: "Div image",
       scale: true,
-      transform3d: true,
-    },
-    {
-      pitch: -9.4,
-      yaw: 222.6,
-      cssClass: "custom-hotspot",
-      createTooltipFunc: hotspot,
-      createTooltipArgs: "Open div 2",
-    },
-    {
-      pitch: -0.9,
-      yaw: 144.4,
-      cssClass: "custom-hotspot",
-      createTooltipFunc: createDivShowImage,
-      createTooltipArgs: "Open div 3",
     },
   ],
 });
@@ -53,19 +38,26 @@ function createCustomDiv(hotSpotDiv, args) {
 
 // create div show image
 function createDivShowImage(hotSpotDiv, args) {
-  const img = document.createElement("img");
-  img.src = "/images/banner2.jpg";
-  [
-    "pnlm-hotspot-bas",
-    "hotspot-embed",
-    "noselect",
-    "poi_embed",
-    "poi_embed_19016",
-    "hotspot_19016",
-    "poi_not_selectable",
-  ].forEach((item) => {
-    hotSpotDiv.classList.add(item);
-  });
+  const translation = [21.492181378117138, 14.967948187849712, 0];
+  imageURL = "/images/banner2.jpg";
+  hotSpotDiv.tabIndex = -1;
+  hotSpotDiv.dataType = "image";
+  hotSpotDiv.dataTransform3d = "1";
+  hotSpotDiv.classList.add("pnlm-hotspot-base", "hotspot-embed", "poi_embed");
+  hotSpotDiv.dataset.transform3d = "1";
+  hotSpotDiv.dataset.initialized = "1";
+  hotSpotDiv.dataset.tooltip_visibility = "hover";
+  hotSpotDiv.style.zIndex = "1";
+  hotSpotDiv.style.visibility = "visible";
+  hotSpotDiv.style.transform = `matrix3d(${translation.join(", ")}, 0, 0, 1)`;
+  hotSpotDiv.style.transformOrigin = "0px 0px";
+  hotSpotDiv.dataset.offscreen = "0";
 
+  const img = document.createElement("img");
+  img.draggable = false;
+  img.src = imageURL;
+  img.style.maxWidth = "100%";
+  img.style.width = "200px";
+  img.style.height = "200px";
   hotSpotDiv.appendChild(img);
 }
